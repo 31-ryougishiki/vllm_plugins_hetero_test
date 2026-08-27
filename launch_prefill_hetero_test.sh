@@ -39,6 +39,11 @@ if [[ -z "${LOCAL_IP}" ]]; then
     echo "[ERROR] cannot detect local ip, please export LOCAL_IP" >&2
     exit 1
 fi
+if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
+    echo "[ERROR] model config not found: ${MODEL_PATH}/config.json" >&2
+    echo "        set MODEL_PATH=/path/to/DeepSeek-V4-Flash-w8a8-mtp-self" >&2
+    exit 1
+fi
 mkdir -p "${LOG_DIR}"
 
 echo "============================================================"
@@ -112,7 +117,8 @@ launch_engine() {
     nohup env \
         ASCEND_RT_VISIBLE_DEVICES="${visible_devices}" \
         VLLM_SERVICE_ID="hetero-test-dp4tp4-dp${dp_rank}" \
-        "${PYTHON_BIN}" -m vllm.entrypoints.openai.api_server "${MODEL_PATH}" \
+        "${PYTHON_BIN}" -m vllm.entrypoints.openai.api_server \
+            --model "${MODEL_PATH}" \
             --host 0.0.0.0 \
             --port "${vllm_port}" \
             --data-parallel-size "${DP_SIZE}" \
