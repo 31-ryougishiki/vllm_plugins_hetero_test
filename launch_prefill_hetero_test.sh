@@ -83,6 +83,9 @@ fi
 
 # ---------------- vllm_plugins / zero_interrupt ----------------
 export VLLM_CUSTOM_PATCHES="${VLLM_CUSTOM_PATCHES:-zero_interrupt}"
+# 纯脚本测试默认跳过 license 校验；生产环境务必去掉该变量并配置
+# LICENSE_PATH / CERT_PATH / PRODUCT_KEY_PATH。
+export VLLM_CUSTOM_PLUGINS_SKIP_LICENSE="${VLLM_CUSTOM_PLUGINS_SKIP_LICENSE:-1}"
 export VLLM_ITS_HTTP_SERVER_PORT_START="${ITS_HTTP_PORT_START}"
 export VLLM_ITS_ENABLE_FAULT_KEEP=true
 export VLLM_ITS_ENABLE_PD_REBUILD=true

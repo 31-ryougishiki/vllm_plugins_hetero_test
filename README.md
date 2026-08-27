@@ -41,6 +41,70 @@ bash install_vllm_plugins.sh
 默认使用 `PIP_NO_INDEX=1` 离线构建 wheel，并执行
 `vllm_plugins/build.sh install`。安装完成后会做一次 import 校验。
 
+#### 安装完成验证
+
+```bash
+# 1. wheel 与插件包
+pip show hw-modelmate-vllm-custom-plugins
+
+python3 - <<'PY'
+import vllm
+import vllm_ascend
+import vllm_custom_plugins
+import importlib.metadata as md
+
+print("vllm           :", vllm.__file__)
+print("vllm-ascend    :", vllm_ascend.__file__)
+print("custom plugins :", vllm_custom_plugins.__file__)
+eps = [
+    ep.value
+    for ep in md.entry_points(group="vllm.general_plugins")
+    if "vllm_custom_plugins" in ep.value
+]
+print("entry points   :", eps)
+assert eps, "vllm_custom_plugins entry point missing"
+PY
+
+# 2. setup.py 的源码替换已生效，且存在 .bak 备份
+python3 - <<'PY'
+from pathlib import Path
+import vllm.config.parallel as vp
+import vllm.distributed.parallel_state as vps
+import vllm.model_executor.layers.fused_moe.config as vmoe
+import vllm_ascend.distributed.parallel_state as ap
+import vllm_ascend.worker.worker as aw
+
+checks = [
+    ("vllm/config/parallel.py", vp, ("HeterogeneousDPConfig", "get_tp_size_for_dp", "is_heterogeneous_tp")),
+    ("vllm/distributed/parallel_state.py", vps, ("init_distributed_environment_asym",)),
+    ("vllm/model_executor/layers/fused_moe/config.py", vmoe, ("FusedMoEParallelConfig",)),
+    ("vllm_ascend/distributed/parallel_state.py", ap, ("init_ascend_model_parallel_asym",)),
+    ("vllm_ascend/worker/worker.py", aw, ("NPUWorker",)),
+]
+for label, mod, attrs in checks:
+    path = Path(mod.__file__).resolve()
+    if label == "vllm/config/parallel.py":
+        attrs_ok = all(hasattr(mod.ParallelConfig, a) for a in attrs)
+    else:
+        attrs_ok = all(hasattr(mod, a) for a in attrs)
+    bak_ok = Path(str(path) + ".bak").exists()
+    print(f"{label:58s} attrs={attrs_ok} bak={bak_ok}")
+    assert attrs_ok
+PY
+
+# 3. 插件 patch 注册 smoke（应打印 Applied ... heterogeneous-TP ...）
+VLLM_CUSTOM_PATCHES=zero_interrupt python3 - <<'PY'
+from vllm_custom_plugins.plugins.zero_interrupt.patch import apply
+
+apply()
+print("zero_interrupt.apply() OK")
+PY
+```
+
+其中第 2 步打印的每个模块都应显示 `attrs=True`；第 3 步应看到
+zero_interrupt 的 patch 日志。最终以第 2 节拉起服务并检查
+`/health` 和 ITS `/health` 为准。
+
 ### 2. 拉起单机 prefill 服务
 
 ```bash
@@ -68,6 +132,10 @@ nohup bash launch_prefill_hetero_test.sh > /opt/its/z30055003/logs/launch.log 2>
 >
 > 默认没有决策中心，脚本会把 `VLLM_ITS_DECISION_CENTER_URL` 指向
 > `127.0.0.1:1` 并只重试 1 次以加快测试；有决策中心时覆盖该环境变量即可。
+>
+> 默认 `VLLM_CUSTOM_PLUGINS_SKIP_LICENSE=1`，跳过 license_verify 以便纯功能
+> 测试。生产/正式环境必须去掉该变量（或设为 0），并配置
+> `LICENSE_PATH`、`CERT_PATH`、`PRODUCT_KEY_PATH`。
 
 ### 3. 手动触发异构重启
 
