@@ -31,6 +31,9 @@ VLLM_PORT_START="${VLLM_PORT_START:-9000}"
 DP_RPC_PORT="${DP_RPC_PORT:-12345}"
 LOG_DIR="${LOG_DIR:-${WORK_ROOT}/logs/prefill}"
 ITS_HTTP_PORT_START="${ITS_HTTP_PORT_START:-8001}"
+# 必须使用安装 vllm_plugins 的同一个 Python 解释器启动服务；
+# 不要依赖 PATH 里的 vllm serve，否则可能落到另一个 vllm 版本。
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if [[ -z "${LOCAL_IP}" ]]; then
     echo "[ERROR] cannot detect local ip, please export LOCAL_IP" >&2
@@ -41,6 +44,7 @@ mkdir -p "${LOG_DIR}"
 echo "============================================================"
 echo "[launch] work root : ${WORK_ROOT}"
 echo "[launch] model     : ${MODEL_PATH}"
+echo "[launch] python    : ${PYTHON_BIN} -> $(command -v "${PYTHON_BIN}")"
 echo "[launch] local ip  : ${LOCAL_IP}  nic: ${NIC}"
 echo "[launch] topology  : DP${DP_SIZE}TP${TP_SIZE} (initial symmetric)"
 echo "[launch] vllm ports: ${VLLM_PORT_START}..$((VLLM_PORT_START + DP_SIZE - 1))"
@@ -108,7 +112,7 @@ launch_engine() {
     nohup env \
         ASCEND_RT_VISIBLE_DEVICES="${visible_devices}" \
         VLLM_SERVICE_ID="hetero-test-dp4tp4-dp${dp_rank}" \
-        vllm serve "${MODEL_PATH}" \
+        "${PYTHON_BIN}" -m vllm.entrypoints.openai.api_server "${MODEL_PATH}" \
             --host 0.0.0.0 \
             --port "${vllm_port}" \
             --data-parallel-size "${DP_SIZE}" \

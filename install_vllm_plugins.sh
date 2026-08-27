@@ -34,13 +34,29 @@ if [[ ! -f "${VLLM_PLUGINS_REPO}/build.sh" ]]; then
     exit 1
 fi
 
-# 安装前确认 vllm / vllm_ascend 可用。
+# 安装前确认 vllm / vllm_ascend 可用，并且是 DeepSeek-V4 所需的 v0.23.0。
 python3 - <<'PY'
+import sys
+
 import vllm
 import vllm_ascend  # noqa: F401
+from packaging.version import Version
 
+print(f"[install] python executable : {sys.executable}")
 print(f"[install] vllm version        : {vllm.__version__}")
+print(f"[install] vllm file            : {vllm.__file__}")
 print(f"[install] vllm_ascend file    : {vllm_ascend.__file__}")
+
+if vllm.__version__ != "dev":
+    if Version(vllm.__version__) < Version("0.23.0"):
+        print(
+            "[ERROR] DeepSeek-V4 heterogeneous restart requires "
+            "vllm>=0.23.0. The current python3 environment has "
+            f"vllm {vllm.__version__}. Install vllm_plugins with the "
+            "SAME python used by the v0.23.0 'vllm serve' command.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 PY
 
 cd "${VLLM_PLUGINS_REPO}"

@@ -38,6 +38,12 @@ cd /opt/its/z30055003/vllm_plugins_hetero_test
 bash install_vllm_plugins.sh
 ```
 
+> **版本一致性要求**：DeepSeek-V4 异构功能基于 vLLM v0.23.0。
+> 安装脚本会检查 `python3` 环境中的 vllm 版本，低于 0.23.0 会直接失败。
+> 同时，启动脚本使用 `python3 -m vllm.entrypoints.openai.api_server`，
+> 而不是 PATH 中的 `vllm serve`，避免安装和启动落到不同 Python/vLLM 环境。
+> 如需用其它解释器，安装和启动时都传 `PYTHON_BIN=/path/to/python`。
+
 默认使用 `PIP_NO_INDEX=1` 离线构建 wheel，并执行
 `vllm_plugins/build.sh install`。安装完成后会做一次 import 校验。
 
@@ -99,11 +105,14 @@ from vllm_custom_plugins.plugins.zero_interrupt.patch import apply
 apply()
 print("zero_interrupt.apply() OK")
 PY
+
+# 4. deepseek_v4 tool parser 已注册（否则 api_server 会拒绝启动）
+python3 -c "from vllm.tool_parsers import ToolParserManager as M; print('deepseek_v4' in M.list_registered(), M.list_registered())"
 ```
 
 其中第 2 步打印的每个模块都应显示 `attrs=True`；第 3 步应看到
-zero_interrupt 的 patch 日志。最终以第 2 节拉起服务并检查
-`/health` 和 ITS `/health` 为准。
+zero_interrupt 的 patch 日志；第 4 步应打印 `True`。最终以第 2 节拉起
+服务并检查 `/health` 和 ITS `/health` 为准。
 
 ### 2. 拉起单机 prefill 服务
 
