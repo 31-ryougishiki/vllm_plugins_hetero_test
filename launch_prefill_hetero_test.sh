@@ -169,16 +169,38 @@ for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
     launch_engine "${dp_rank}" "${visible_devices}" "${vllm_port}"
 done
 
+# 健康检查：用 Python urllib 并且显式禁用代理。
+# 新节点常配置 http_proxy/http_proxy，curl 会对 127.0.0.1 也走代理导致 -sf 失败；
+# 个别镜像又没有 curl。这里统一绕过代理，并避免依赖 curl 是否存在。
+check_health() {
+    local port="$1"
+    python3 - "${port}" <<'PY'
+import sys
+import urllib.request
+
+port = int(sys.argv[1])
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    with opener.open(f"http://127.0.0.1:{port}/health", timeout=5) as resp:
+        sys.exit(0 if resp.status == 200 else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
 echo "[launch] waiting for ${DP_SIZE} vllm engines ..."
 READY=0
-for _ in $(seq 1 300); do
+for attempt in $(seq 1 300); do
     READY=0
     for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
         vllm_port=$((VLLM_PORT_START + dp_rank))
-        if curl -sf "http://127.0.0.1:${vllm_port}/health" >/dev/null 2>&1; then
+        if check_health "${vllm_port}"; then
             READY=$((READY + 1))
         fi
     done
+    if (( attempt == 1 || attempt % 10 == 0 || READY != 0 )); then
+        echo "[launch] readiness attempt=${attempt}, ready=${READY}/${DP_SIZE}"
+    fi
     if [[ "${READY}" -eq "${DP_SIZE}" ]]; then
         break
     fi
@@ -187,7 +209,11 @@ done
 
 if [[ "${READY}" -ne "${DP_SIZE}" ]]; then
     echo "[ERROR] only ${READY}/${DP_SIZE} vllm engines became ready in 600s." >&2
+    echo "[ERROR] health probe: http://127.0.0.1:${VLLM_PORT_START}..$((VLLM_PORT_START + DP_SIZE - 1))/health" >&2
     echo "[ERROR] check logs under ${LOG_DIR}" >&2
+    echo "[ERROR] proxy env: $(env | grep -i proxy || true)" >&2
+    echo "[ERROR] listening ports:" >&2
+    (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) >&2
     exit 1
 fi
 
