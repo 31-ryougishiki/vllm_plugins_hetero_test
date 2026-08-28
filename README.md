@@ -1,12 +1,13 @@
 # vllm_plugins 异构重启测试脚本
 
-本目录包含三个测试脚本：
+本目录包含三个基础测试脚本和 PD 分离场景脚本：
 
-| 脚本 | 作用 |
+| 脚本/目录 | 作用 |
 |------|------|
 | `install_vllm_plugins.sh` | 在远程 A3 节点安装 `vllm_plugins` 仓 |
 | `launch_prefill_hetero_test.sh` | 单机拉起 prefill `DP4TP4`（DeepSeek-V4-Flash-w8a8-mtp + MTP + PD kv_producer） |
 | `trigger_hetero_restart.sh` | 模拟 NPU 卡故障，向 4 个 executor 手动下发 `DP4TP(3,4,4,4)` 异构策略 |
+| `pd_hetero/` | PD 分离场景 1：prefill 转异构、decode `DP16TP1` 不变，详见 `pd_hetero/README.md` |
 
 假设远程工作路径：`/opt/its/z30055003`。
 
