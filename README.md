@@ -82,7 +82,7 @@ import vllm_ascend.worker.worker as aw
 
 checks = [
     ("vllm/config/parallel.py", vp, ("HeterogeneousDPConfig", "get_tp_size_for_dp", "is_heterogeneous_tp")),
-    ("vllm/distributed/parallel_state.py", vps, ("init_distributed_environment_asym",)),
+    ("vllm/distributed/parallel_state.py", vps, ("init_distributed_environment",)),
     ("vllm/model_executor/layers/fused_moe/config.py", vmoe, ("FusedMoEParallelConfig",)),
     ("vllm_ascend/distributed/parallel_state.py", ap, ("init_ascend_model_parallel_asym",)),
     ("vllm_ascend/worker/worker.py", aw, ("NPUWorker",)),
