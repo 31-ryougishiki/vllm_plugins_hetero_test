@@ -210,6 +210,11 @@ class ProxyState:
         heapq.heapify(self.prefiller_heap)
         heapq.heapify(self.decoder_heap)
 
+        # 测试辅助：所有 decoder 优先级相同时按严格轮转选择。否则
+        # heap 会一直选 index=0，导致只有第一个 decoder 被 warmup，
+        # 其余 decoder 的远端 KV 元数据未建立，正式请求仍触发 recompute。
+        self.decoder_rr_counter = 0
+
     def _update_prefiller_priority(self, server_idx: int):
         """Update the priority of a prefiller server in the heap."""
         server = self.prefillers[server_idx]
@@ -286,8 +291,19 @@ class ProxyState:
 
     def select_decoder(self, token_count):  # Changed to synchronous
         # No lock needed - entire function is atomic
-        if not self.decoder_heap:
+        if not self.decoders or not self.decoder_heap:
             raise RuntimeError("No decoder servers available")
+
+        # 所有 decoder 负载相同时，原 heap 永远选 index=0。测试场景需要
+        # 通过若干 warmup 请求让每个 decoder 都建立一次远端 KV 元数据，
+        # 因此负载相等时改用严格轮转。
+        priorities = [entry[0] for entry in self.decoder_heap]
+        if len(set(priorities)) == 1:
+            chosen = self.decoder_rr_counter % len(self.decoders)
+            self.decoder_rr_counter += 1
+            self.decoders[chosen].active_tokens += token_count
+            self._update_decoder_priority(chosen)
+            return chosen
 
         priority, chosen, server = heapq.heappop(self.decoder_heap)
 

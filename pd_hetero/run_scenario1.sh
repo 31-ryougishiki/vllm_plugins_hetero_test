@@ -58,6 +58,10 @@ REQUIRE_OUTPUT_MATCH="${REQUIRE_OUTPUT_MATCH:-1}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
 WARMUP_RETRIES="${WARMUP_RETRIES:-30}"
 WARMUP_INTERVAL="${WARMUP_INTERVAL:-10}"
+# 每个 decode engine 首次接收远端 KV 时都可能 recompute。代理在负载相
+# 等时按轮转选择 decoder，因此 warmup 必须覆盖全部 DECODE_DP_SIZE 个
+# decoder，而不是只成功一次。
+WARMUP_REQUESTS="${WARMUP_REQUESTS:-${DECODE_DP_SIZE}}"
 REQUEST_TEMPERATURE="${REQUEST_TEMPERATURE:-0.0}"
 REQUEST_SEED="${REQUEST_SEED:-1024}"
 PROMPT="${PROMPT:-请解释一下量子计算的基本原理。量子计算的基本原理是：}"
@@ -147,8 +151,11 @@ wait_log_marker() {
 run_warmup() {
     local label="$1"
     local log_file="${SCENARIO_LOG_DIR}/${label}_warmup.log"
-    echo "[scenario1] ${label}: warming up PD chain (max ${WARMUP_RETRIES} attempts)"
-    for attempt in $(seq 1 "${WARMUP_RETRIES}"); do
+    local successes=0
+    local max_attempts=$((WARMUP_REQUESTS + WARMUP_RETRIES))
+    echo "[scenario1] ${label}: warming up PD chain "
+    echo "  (need ${WARMUP_REQUESTS} successful requests to cover all decoders)"
+    for attempt in $(seq 1 "${max_attempts}"); do
         if "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
                 --url "${PROXY_URL}" \
                 --model dsv4 \
@@ -156,21 +163,28 @@ run_warmup() {
                 --max-tokens 8 \
                 --temperature "${REQUEST_TEMPERATURE}" \
                 --seed "${REQUEST_SEED}" \
-                --output "${SCENARIO_LOG_DIR}/${label}_warmup.json" \
+                --output "${SCENARIO_LOG_DIR}/${label}_warmup_${successes}.json" \
                 --timeout 300 \
                 > "${log_file}" 2>&1; then
             finish="$(grep '^FINISH_REASON=' "${log_file}" | tail -n 1 || true)"
-            echo "[scenario1] ${label}: warmup attempt=${attempt} ${finish}"
-            if [[ "${finish}" != "FINISH_REASON=recomputed" ]]; then
+            if [[ "${finish}" == "FINISH_REASON=recomputed" ]]; then
+                echo "[scenario1] ${label}: warmup attempt=${attempt} still recomputed"
+                sleep "${WARMUP_INTERVAL}"
+                continue
+            fi
+            successes=$((successes + 1))
+            echo "[scenario1] ${label}: warmup ${successes}/${WARMUP_REQUESTS} ${finish}"
+            if (( successes >= WARMUP_REQUESTS )); then
                 echo "[scenario1] ${label}: PD chain warmup completed"
                 return 0
             fi
         else
             echo "[scenario1] ${label}: warmup attempt=${attempt} failed"
+            sleep "${WARMUP_INTERVAL}"
         fi
-        sleep "${WARMUP_INTERVAL}"
     done
-    echo "[scenario1][ERROR] ${label}: PD chain did not become ready" >&2
+    echo "[scenario1][ERROR] ${label}: PD chain did not become ready "
+    echo "  (only ${successes}/${WARMUP_REQUESTS} successful warmups)" >&2
     tail -n 20 "${log_file}" >&2 || true
     return 1
 }

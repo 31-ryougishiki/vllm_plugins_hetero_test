@@ -187,7 +187,8 @@ DECODE_FAULT_NPU=15 bash decode/trigger_decode_fault.sh
 | `SSH_DECODE` | 空 | 场景2通过 SSH 触发 D 端时必填，如 `root@ip` |
 | `REQUIRE_OUTPUT_MATCH` | 1 | 1=异构前后输出必须完全一致；0=仅要求非空 |
 | `REQUEST_TEMPERATURE` / `REQUEST_SEED` | 0.0 / 1024 | 请求采样参数；0=贪心解码，保证两次独立请求可比较 |
-| `WARMUP_RETRIES` / `WARMUP_INTERVAL` | 30 / 10 | 正式请求前 PD 链路预热次数与间隔，吸收首次 `recomputed` |
+| `WARMUP_REQUESTS` | 场景1=16；场景2 基线=16、降级后=15 | 预热成功请求数，覆盖全部 decoder，避免只 warmup 第一个 decoder |
+| `WARMUP_RETRIES` / `WARMUP_INTERVAL` | 30 / 10 | 预热失败/仍 recompute 时的额外重试次数与间隔 |
 | `START_PREFILL` / `START_PROXY` | 1 | 编排脚本是否自动拉起 P / 代理 |
 | `RESTART_TIMEOUT` | 900 | 等待全量重启/KV 恢复的超时秒数 |
 

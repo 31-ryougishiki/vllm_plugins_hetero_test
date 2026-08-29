@@ -66,6 +66,8 @@ REQUIRE_OUTPUT_MATCH="${REQUIRE_OUTPUT_MATCH:-1}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
 WARMUP_RETRIES="${WARMUP_RETRIES:-30}"
 WARMUP_INTERVAL="${WARMUP_INTERVAL:-10}"
+# warmup 数量在基线前设为 DECODE_DP_SIZE，D 降级后设为 NEW_DECODE_DP。
+WARMUP_REQUESTS="${WARMUP_REQUESTS:-${DECODE_DP_SIZE}}"
 REQUEST_TEMPERATURE="${REQUEST_TEMPERATURE:-0.0}"
 REQUEST_SEED="${REQUEST_SEED:-1024}"
 D_DEGRADE_SETTLE_TIME="${D_DEGRADE_SETTLE_TIME:-30}"
@@ -147,8 +149,11 @@ all_http_ready() {
 run_warmup() {
     local label="$1"
     local log_file="${SCENARIO_LOG_DIR}/${label}_warmup.log"
-    echo "[scenario2] ${label}: warming up PD chain (max ${WARMUP_RETRIES} attempts)"
-    for attempt in $(seq 1 "${WARMUP_RETRIES}"); do
+    local successes=0
+    local max_attempts=$((WARMUP_REQUESTS + WARMUP_RETRIES))
+    echo "[scenario2] ${label}: warming up PD chain "
+    echo "  (need ${WARMUP_REQUESTS} successful requests to cover all active decoders)"
+    for attempt in $(seq 1 "${max_attempts}"); do
         if "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
                 --url "${PROXY_URL}" \
                 --model dsv4 \
@@ -156,21 +161,28 @@ run_warmup() {
                 --max-tokens 8 \
                 --temperature "${REQUEST_TEMPERATURE}" \
                 --seed "${REQUEST_SEED}" \
-                --output "${SCENARIO_LOG_DIR}/${label}_warmup.json" \
+                --output "${SCENARIO_LOG_DIR}/${label}_warmup_${successes}.json" \
                 --timeout 300 \
                 > "${log_file}" 2>&1; then
             finish="$(grep '^FINISH_REASON=' "${log_file}" | tail -n 1 || true)"
-            echo "[scenario2] ${label}: warmup attempt=${attempt} ${finish}"
-            if [[ "${finish}" != "FINISH_REASON=recomputed" ]]; then
+            if [[ "${finish}" == "FINISH_REASON=recomputed" ]]; then
+                echo "[scenario2] ${label}: warmup attempt=${attempt} still recomputed"
+                sleep "${WARMUP_INTERVAL}"
+                continue
+            fi
+            successes=$((successes + 1))
+            echo "[scenario2] ${label}: warmup ${successes}/${WARMUP_REQUESTS} ${finish}"
+            if (( successes >= WARMUP_REQUESTS )); then
                 echo "[scenario2] ${label}: PD chain warmup completed"
                 return 0
             fi
         else
             echo "[scenario2] ${label}: warmup attempt=${attempt} failed"
+            sleep "${WARMUP_INTERVAL}"
         fi
-        sleep "${WARMUP_INTERVAL}"
     done
-    echo "[scenario2][ERROR] ${label}: PD chain did not become ready" >&2
+    echo "[scenario2][ERROR] ${label}: PD chain did not become ready "
+    echo "  (only ${successes}/${WARMUP_REQUESTS} successful warmups)" >&2
     tail -n 20 "${log_file}" >&2 || true
     return 1
 }
@@ -248,6 +260,7 @@ wait_http "proxy" "${PROXY_HOST}" "${PROXY_PORT}" /healthcheck 120 || exit 1
 # ------------------------------------------------------------------
 # 4. D 故障前的基线请求。
 # ------------------------------------------------------------------
+WARMUP_REQUESTS="${DECODE_DP_SIZE}"
 run_warmup "baseline" || exit 1
 echo "[scenario2] baseline request (DP16TP1 decode) ..."
 if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
@@ -354,6 +367,7 @@ remove_proxy_instance "${DECODE_HOST}" "${FAULT_DECODE_PORT}" \
 # ------------------------------------------------------------------
 # 8. D 降级后的复测请求。
 # ------------------------------------------------------------------
+WARMUP_REQUESTS="${NEW_DECODE_DP}"
 run_warmup "post_degrade" || exit 1
 echo "[scenario2] post-degrade request (DP15TP1 decode) ..."
 if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
