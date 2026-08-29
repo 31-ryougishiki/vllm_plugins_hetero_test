@@ -255,6 +255,15 @@ grep "RESULT_TEXT=" "${SCENARIO_LOG_DIR}/pre_request.log"
 # ------------------------------------------------------------------
 # 5. 只对 P 端下发异构重启策略。
 # ------------------------------------------------------------------
+# trigger 脚本只做 HTTP POST，不会检查 ITS 端口是否真正在监听。
+# 这里提前校验 4 个 executor 的 ITS /health，端口没起来时尽早给出
+# 明确错误，而不是等到 trigger.log 里出现 4 个 Connection refused。
+for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
+    its_port=$((ITS_HTTP_PORT_START + dp_rank * TP_SIZE))
+    wait_http "prefill ITS dp${dp_rank}" "127.0.0.1" "${its_port}" \
+        /health 120 || exit 1
+done
+
 echo "[scenario1] triggering prefill DP4TP4 -> DP4TP(3,4,4,4) ..."
 if ! LOCAL_IP="${LOCAL_IP}" \
         ITS_HTTP_PORT_START="${ITS_HTTP_PORT_START}" \
