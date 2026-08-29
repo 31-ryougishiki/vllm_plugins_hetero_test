@@ -60,7 +60,13 @@ bash install_vllm_plugins.sh
 `load_balance_proxy_server.py` 头部说明），缺少时先安装：  
 `pip install "fastapi<0.124.0" httpx uvicorn`
 
-### 1. D 节点启动 decode（保持 DP16TP1）
+### 1. 拉起服务：D 与 P 可以并发，不必先等 D 就绪
+
+两个节点模型加载都很慢，**推荐同时拉起**。P 端 `run_scenario1.sh`
+会先拉起对称 prefill，然后在需要发基线请求前等待 16 个 decode engine
+健康；D 端晚一点就绪只会推迟“基线请求”这一步，不会导致服务启动失败。
+
+D 节点执行：
 
 ```bash
 cd /opt/its/z30055003/vllm_plugins_hetero_test/pd_hetero
@@ -68,9 +74,7 @@ nohup bash decode/launch_decode_pd.sh \
   > /opt/its/z30055003/logs/decode/launch.log 2>&1 &
 ```
 
-脚本会等待 16 个 decode engine `/health` 就绪后返回。
-
-### 2. P 节点执行场景 1
+紧接着在 P 节点执行：
 
 ```bash
 cd /opt/its/z30055003/vllm_plugins_hetero_test/pd_hetero
@@ -78,6 +82,11 @@ DECODE_HOST=<decode-node-ip> \
 nohup bash run_scenario1.sh \
   > /opt/its/z30055003/logs/pd_scenario1/run.log 2>&1 &
 ```
+
+不需要等 D 的 `/health` 全部通过后再启动 P；两边各自加载模型，
+场景脚本只会在“发第一个请求”和“触发异构重启”之前等待两端就绪。
+
+### 2. 场景 1 自动执行内容
 
 脚本自动完成：
 
