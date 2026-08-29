@@ -1,9 +1,10 @@
 # PD 分离测试场景（MooncakeHybridConnector）
 
-本目录提供两个 PD 分离测试场景：
+本目录提供三个 PD 分离测试场景：
 
 - 场景 1：prefill 节点坏 1 卡转异构，decode 节点保持不变；
-- 场景 2：decode 节点坏 1 卡缩容，prefill 节点保持不变。
+- 场景 2：decode 节点坏 1 卡缩容，prefill 节点保持不变；
+- 场景 3：RECOVER，把场景 1/2 的降级拓扑恢复回对称 DP4TP4 + DP16TP1。
 
 脚本风格参考 `hetero_cp/run_script_hetero/`：
 
@@ -22,16 +23,22 @@ pd_hetero/
 ├── README.md
 ├── run_scenario1.sh                # 场景1编排：P 转异构，D 不变
 ├── run_scenario2.sh                # 场景2编排：D 坏1卡缩容，P 不变
+├── run_scenario3.sh                # 场景3编排：P/D RECOVER 恢复对称拓扑
 ├── send_pd_request.py              # 经代理发请求并保存/校验输出
 ├── check_decode_unchanged.sh       # 场景1校验 D 端健康且未被重启
 ├── decode/
 │   ├── launch_decode_pd.sh         # D 节点启动 dp16/tp1
 │   ├── trigger_decode_fault.sh     # 场景2触发 D 端 dp16 -> dp15
-│   └── run_decode_fault_alone.sh   # 仅 D 节点单独跑场景2（不依赖 P/代理）
+│   ├── run_decode_fault_alone.sh   # 仅 D 节点单独跑场景2（不依赖 P/代理）
+│   ├── trigger_decode_recover.sh   # 场景3触发 D 端 dp15 -> dp16
+│   └── run_decode_recover_alone.sh # 仅 D 节点单独跑 RECOVER（不依赖 P/代理）
 └── proxy/
     ├── start_proxy_pd.sh           # P 节点启动 PD 代理
     └── load_balance_proxy_server.py
 ```
+
+根目录另有 `trigger_prefill_recover.sh`，供场景 3 触发 P 端
+`DP4TP(3,4,4,4) -> DP4TP4`。
 
 ## 拓扑
 
@@ -184,6 +191,83 @@ nohup bash decode/run_decode_fault_alone.sh \
 8. 对比两次输出，默认要求完全一致；
 9. 确认 P 端日志没有新增 restart 记录。
 
+## 场景 3：RECOVER，恢复对称拓扑
+
+前置状态由场景 1/2 制造：
+
+```text
+prefill: DP4TP(3,4,4,4) 异构      decode: DP15TP1（executor 15 Idle）
+                    │RECOVER              │RECOVER
+                    ▼                     ▼
+prefill: DP4TP4 对称             decode: DP16TP1
+```
+
+### 执行步骤
+
+在 P 节点执行（默认通过 SSH 触发 D 端恢复）：
+
+```bash
+cd /opt/its/z30055003/vllm_plugins_hetero_test/pd_hetero
+SSH_DECODE="root@<decode-node-ip>" \
+DECODE_HOST=<decode-node-ip> \
+nohup bash run_scenario3.sh \
+  > /opt/its/z30055003/logs/pd_scenario3/run.log 2>&1 &
+```
+
+脚本默认 `RECOVER_TARGET=both`，依次完成：
+
+1. 校验 P 4 个 engine 与 D 15 个健康 decoder 在线、代理健康；
+2. 向 P 的 4 个 executor 下发 `RECOVER`：
+   `DP4TP(3,4,4,4) -> DP4TP4`；
+3. 等待 P 全量重启 barrier、KV connector 元数据恢复，并确认 D 的 15 个
+   decoder 在 P 轮换 engine_id 后仍健康；
+4. 向 D 的 16 个 executor 下发 `RECOVER`：
+   `DP15TP1 -> DP16TP1`（executor 15 从 Idle mode 重新拉起 worker）；
+5. 等待 16 个 decoder 恢复，并把 decoder 15 加回代理；
+6. 全链路 warmup 覆盖当前全部 decoder，发复测请求并与降级前基线对比。
+
+只恢复单侧时：
+
+```bash
+# 只恢复 P（D 保持 DP15）
+RECOVER_TARGET=prefill bash run_scenario3.sh
+
+# 只恢复 D（P 保持异构）
+RECOVER_TARGET=decode \
+TRIGGER_MODE=local bash run_scenario3.sh
+```
+
+没有 SSH 时，在 D 节点先执行：
+
+```bash
+DECODE_FAULT_NPU=15 bash decode/trigger_decode_recover.sh
+```
+
+然后 P 节点以 `TRIGGER_MODE=local` 运行 `run_scenario3.sh`。
+
+只想在 **D 节点单独验证恢复**（不需要 P 和代理）时：
+
+```bash
+LOCAL_IP=7.246.78.76 DECODE_FAULT_NPU=15 \
+nohup bash decode/run_decode_recover_alone.sh \
+  > /opt/its/z30055003/logs/decode/run_recover_alone.log 2>&1 &
+```
+
+该脚本直接请求 decode engine，执行“确认 15 健康 + 1 idle →
+触发 RECOVER → 16 卡健康 → 复测 → 与降级前基线对比”。
+
+### RECOVER 与场景 1/2 的关键差异
+
+- `trigger_decode_recover.sh` 给**全部 16 个 executor**下发 RECOVER，
+  包括此前 `new_tp=0/new_dp=0` 的空转 executor；健康 executor 当前
+  EngineCore dp_group 只有 15 个 rank，空转 executor 还挂着旧的 16-rank
+  group，因此控制面会先按目标 `dp=16` 重建一个包含全部 16 个 rank 的
+  stateless gloo group，barrier 通过后再统一杀旧 worker / 起新 worker。
+- 恢复后的 executor 15 必须参与 `Full-restart barrier passed`，而不是
+  场景 2 的 `Full-restart barrier skipped`。
+- P 端 `RECOVER` 会再次轮换 `engine_id`；D 端依赖 Mooncake patch 按新
+  `(engine_id, handshake_port)` 重新拉取元数据。
+
 ## 常用环境变量
 
 | 变量 | 默认 | 说明 |
@@ -194,9 +278,11 @@ nohup bash decode/run_decode_fault_alone.sh \
 | `VLLM_PORT_START` | 9000 | P 端 vLLM 起始端口 |
 | `PROXY_PORT` | 8000 | PD 代理端口 |
 | `FAULT_NPU` | 3 | 场景1故障卡，必须在 DP0 的 NPU 0..3 |
-| `DECODE_FAULT_NPU` | 15 | 场景2故障卡，范围 0..15 |
-| `TRIGGER_MODE` | ssh | 场景2触发方式：ssh / local / skip |
-| `SSH_DECODE` | 空 | 场景2通过 SSH 触发 D 端时必填，如 `root@ip` |
+| `DECODE_FAULT_NPU` | 15 | 场景2/3的故障卡，范围 0..15 |
+| `TRIGGER_MODE` | ssh | 场景2/3触发方式：ssh / local（场景2还支持 skip） |
+| `SSH_DECODE` | 空 | 场景2/3通过 SSH 触发 D 端时必填，如 `root@ip` |
+| `RECOVER_TARGET` | both | 场景3恢复范围：both / prefill / decode |
+| `BASELINE_OUTPUT` | 按目标自动选择 | 场景3对比基线；默认分别取场景1 pre/post、场景2 post 输出 |
 | `REQUIRE_OUTPUT_MATCH` | 1 | 1=异构前后输出必须完全一致；0=仅要求非空 |
 | `REQUEST_TEMPERATURE` / `REQUEST_SEED` | 0.0 / 1024 | 请求采样参数；0=贪心解码，保证两次独立请求可比较 |
 | `WARMUP_REQUESTS` | 场景1=16；场景2 基线=16、降级后=15 | 预热成功请求数，覆盖全部 decoder，避免只 warmup 第一个 decoder |
