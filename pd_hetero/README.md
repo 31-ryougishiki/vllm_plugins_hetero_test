@@ -1,7 +1,11 @@
-# PD 分离场景 1：prefill 转异构，decode 保持不变
+# PD 分离测试场景（MooncakeHybridConnector）
 
-本目录提供 PD 分离（MooncakeHybridConnector）下“P 端故障后异构重启、D 端不重启”
-的测试脚本，脚本风格参考 `hetero_cp/run_script_hetero/`：
+本目录提供两个 PD 分离测试场景：
+
+- 场景 1：prefill 节点坏 1 卡转异构，decode 节点保持不变；
+- 场景 2：decode 节点坏 1 卡缩容，prefill 节点保持不变。
+
+脚本风格参考 `hetero_cp/run_script_hetero/`：
 
 - `hetero_cp/run_script_hetero/prefill/*` 对应 P 端异构启动方式；
 - `hetero_cp/run_script_hetero/decode/*` 对应 D 端 `dp16/tp1` 启动方式；
@@ -16,11 +20,13 @@
 ```text
 pd_hetero/
 ├── README.md
-├── run_scenario1.sh                # P 节点上的场景编排（基线→触发→复测→对比）
+├── run_scenario1.sh                # 场景1编排：P 转异构，D 不变
+├── run_scenario2.sh                # 场景2编排：D 坏1卡缩容，P 不变
 ├── send_pd_request.py              # 经代理发请求并保存/校验输出
-├── check_decode_unchanged.sh       # 校验 D 端健康且未被重启
+├── check_decode_unchanged.sh       # 场景1校验 D 端健康且未被重启
 ├── decode/
-│   └── launch_decode_pd.sh         # D 节点启动 dp16/tp1（保持不变）
+│   ├── launch_decode_pd.sh         # D 节点启动 dp16/tp1
+│   └── trigger_decode_fault.sh     # 场景2触发 D 端 dp16 -> dp15
 └── proxy/
     ├── start_proxy_pd.sh           # P 节点启动 PD 代理
     └── load_balance_proxy_server.py
@@ -119,16 +125,66 @@ bash check_decode_unchanged.sh
 校验项：16 个 `/health` 均为 200，且 decode 日志中不存在
 `restarting workers of EVERY DP instance`。
 
+## 场景 2：decode 坏 1 卡，prefill 保持不变
+
+拓扑变化：D 端 `DP16TP1 -> DP15TP1`（默认故障 NPU 15），P 端始终保持对称
+`DP4TP4`，不接收任何策略。
+
+### 执行步骤
+
+D 节点先启动 decode（与场景 1 相同，可并发启动）：
+
+```bash
+cd /opt/its/z30055003/vllm_plugins_hetero_test/pd_hetero
+nohup bash decode/launch_decode_pd.sh \
+  > /opt/its/z30055003/logs/decode/launch.log 2>&1 &
+```
+
+P 节点执行场景编排，默认通过 SSH 触发 D 端故障脚本：
+
+```bash
+cd /opt/its/z30055003/vllm_plugins_hetero_test/pd_hetero
+SSH_DECODE="root@<decode-node-ip>" \
+DECODE_HOST=<decode-node-ip> \
+DECODE_FAULT_NPU=15 \
+nohup bash run_scenario2.sh \
+  > /opt/its/z30055003/logs/pd_scenario2/run.log 2>&1 &
+```
+
+没有 SSH 时，在 D 节点手动执行：
+
+```bash
+DECODE_FAULT_NPU=15 bash decode/trigger_decode_fault.sh
+```
+
+然后 P 节点以 `TRIGGER_MODE=skip` 运行 `run_scenario2.sh`。
+
+### 场景 2 自动执行内容
+
+1. 确认 P 对称 `DP4TP4` 与 D 初始 `DP16TP1` 健康；
+2. 基线请求（`pre_decode_fault.json`）；
+3. 记录 P 端 restart 日志条数（用于证明 P 未被重启）；
+4. 触发 D 端故障：16 个 decode executor 全部收到 `PD_REBUILD`，
+   故障 executor 缩到 `new_dp=0/new_tp=0`，其余 `new_dp=15`；
+5. 等待 D 端 15 个健康 engine 恢复；
+6. 从代理摘除故障 decoder；
+7. PD 链路预热，发复测请求（`post_decode_fault.json`）；
+8. 对比两次输出，默认要求完全一致；
+9. 确认 P 端日志没有新增 restart 记录。
+
 ## 常用环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `DECODE_HOST` | 必填 | decode 节点 IP |
 | `DECODE_VLLM_PORT_START` | 9100 | D 端 vLLM 起始端口 |
-| `DECODE_DP_SIZE` | 16 | D 端 DP 数（保持不变） |
+| `DECODE_DP_SIZE` | 16 | D 端初始 DP 数 |
 | `VLLM_PORT_START` | 9000 | P 端 vLLM 起始端口 |
 | `PROXY_PORT` | 8000 | PD 代理端口 |
-| `FAULT_NPU` | 3 | 模拟故障卡，必须在 DP0 的 NPU 0..3 |
+| `FAULT_NPU` | 3 | 场景1故障卡，必须在 DP0 的 NPU 0..3 |
+| `DECODE_FAULT_NPU` | 15 | 场景2故障卡，范围 0..15 |
+| `TRIGGER_MODE` | ssh | 场景2触发方式：ssh / local / skip |
+| `SSH_DECODE` | 空 | 场景2通过 SSH 触发 D 端时必填，如 `root@ip` |
 | `REQUIRE_OUTPUT_MATCH` | 1 | 1=异构前后输出必须完全一致；0=仅要求非空 |
 | `REQUEST_TEMPERATURE` / `REQUEST_SEED` | 0.0 / 1024 | 请求采样参数；0=贪心解码，保证两次独立请求可比较 |
 | `WARMUP_RETRIES` / `WARMUP_INTERVAL` | 30 / 10 | 正式请求前 PD 链路预热次数与间隔，吸收首次 `recomputed` |
