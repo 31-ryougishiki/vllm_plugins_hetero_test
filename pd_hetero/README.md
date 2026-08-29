@@ -6,6 +6,10 @@
 - 场景 2：decode 节点坏 1 卡缩容，prefill 节点保持不变；
 - 场景 3：RECOVER，把场景 1/2 的降级拓扑恢复回对称 DP4TP4 + DP16TP1。
 
+如需由决策中心（`http://7.246.78.79:8088`）触发扩缩容而不是手动 POST
+executor，请使用根目录的 `decision_center/` 脚本，或在场景脚本里设置
+`TRIGGER_MODE=dc`。
+
 脚本风格参考 `hetero_cp/run_script_hetero/`：
 
 - `hetero_cp/run_script_hetero/prefill/*` 对应 P 端异构启动方式；
@@ -283,6 +287,8 @@ nohup bash decode/run_decode_recover_alone.sh \
 | `SSH_DECODE` | 空 | 场景2/3通过 SSH 触发 D 端时必填，如 `root@ip` |
 | `RECOVER_TARGET` | both | 场景3恢复范围：both / prefill / decode |
 | `BASELINE_OUTPUT` | 按目标自动选择 | 场景3对比基线；默认分别取场景1 pre/post、场景2 post 输出 |
+| `TRIGGER_MODE` | manual / ssh | 场景1/2/3触发方式：manual（直连 executor）、ssh/local/skip、**dc（决策中心）** |
+| `DECISION_CENTER_URL` | `http://7.246.78.79:8088` | `TRIGGER_MODE=dc` 时使用的决策中心地址 |
 | `REQUIRE_OUTPUT_MATCH` | 1 | 1=异构前后输出必须完全一致；0=仅要求非空 |
 | `REQUEST_TEMPERATURE` / `REQUEST_SEED` | 0.0 / 1024 | 请求采样参数；0=贪心解码，保证两次独立请求可比较 |
 | `WARMUP_REQUESTS` | 场景1=16；场景2 基线=16、降级后=15 | 预热成功请求数，覆盖全部 decoder，避免只 warmup 第一个 decoder |
