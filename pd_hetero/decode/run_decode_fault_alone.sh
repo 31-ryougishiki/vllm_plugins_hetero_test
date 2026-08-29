@@ -21,7 +21,8 @@
 #   WORK_ROOT / MODEL_PATH / LOCAL_IP / NIC /
 #   DECODE_DP_SIZE / DECODE_VLLM_PORT_START / DECODE_FAULT_NPU /
 #   DECODE_ITS_PORT_START / DECODE_LOG_DIR / RESTART_TIMEOUT /
-#   REQUIRE_OUTPUT_MATCH / START_DECODE / MAX_TOKENS / PYTHON_BIN
+#   FAULT_IDLE_TIMEOUT / REQUIRE_OUTPUT_MATCH / START_DECODE /
+#   MAX_TOKENS / PYTHON_BIN
 
 set -uo pipefail
 
@@ -38,6 +39,7 @@ DECODE_FAULT_NPU="${DECODE_FAULT_NPU:-15}"
 DECODE_ITS_PORT_START="${DECODE_ITS_PORT_START:-18001}"
 DECODE_LOG_DIR="${DECODE_LOG_DIR:-${WORK_ROOT}/logs/decode}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
+FAULT_IDLE_TIMEOUT="${FAULT_IDLE_TIMEOUT:-30}"
 START_DECODE="${START_DECODE:-1}"
 REQUIRE_OUTPUT_MATCH="${REQUIRE_OUTPUT_MATCH:-1}"
 REQUEST_TEMPERATURE="${REQUEST_TEMPERATURE:-0.0}"
@@ -190,21 +192,26 @@ for ((rank = 0; rank < DECODE_DP_SIZE; rank++)); do
         "$((DECODE_VLLM_PORT_START + rank))" "${RESTART_TIMEOUT}" || exit 1
 done
 
-# 故障 executor 应进入空转状态。
+# 故障 executor 应进入空转状态。若其永久不可达，此检查只做短时 best-effort，
+# 不允许拖慢健康 executor 的复测请求。
 wait_marker_or_warn() {
     local log_file="$1"
     local marker="$2"
-    for _attempt in $(seq 1 $((RESTART_TIMEOUT / 2))); do
+    local timeout="${3:-30}"
+    for _attempt in $(seq 1 $((timeout / 2))); do
         if grep -q "${marker}" "${log_file}" 2>/dev/null; then
             echo "[decode-alone] fault executor marker found: '${marker}'"
             return 0
         fi
         sleep 2
     done
-    echo "[decode-alone][WARN] fault executor marker '${marker}' not found in ${log_file}" >&2
+    echo "[decode-alone][WARN] fault executor marker '${marker}' not found in ${log_file} within ${timeout}s" >&2
     return 1
 }
-wait_marker_or_warn "${DECODE_LOG_DIR}/dp${DECODE_FAULT_NPU}.log" "Idle mode (dp=0)" || true
+wait_marker_or_warn \
+    "${DECODE_LOG_DIR}/dp${DECODE_FAULT_NPU}.log" \
+    "Idle mode (dp=0)" \
+    "${FAULT_IDLE_TIMEOUT}" || true
 
 # ------------------------------------------------------------------
 # 5. 复测请求（打到同一个非故障 rank，便于确定性对比）。

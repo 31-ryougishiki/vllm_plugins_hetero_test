@@ -4,10 +4,12 @@
 #
 # PD 分离场景 2：decode 节点坏 1 卡，prefill 节点保持不变。
 #
-# 在 D 节点本地执行。向 16 个 decode executor 的 ITS HTTP 端口下发
-# PD_REBUILD 策略：
+# 在 D 节点本地执行。向健康 decode executor 的 ITS HTTP 端口下发
+# PD_REBUILD 策略（策略 payload 仍包含全部 16 条 config，供存活组
+# barrier 计算 scale-to-zero rank）：
 #   - executor 0..14: DP16 -> DP15，TP1 保持不变；
-#   - executor 15（默认故障卡 NPU 15）: new_tp=0/new_dp=0，空转退出。
+#   - executor 15（默认故障卡 NPU 15）: new_tp=0/new_dp=0，空转退出；
+#     该 executor 只做 best-effort 下发，连接失败不阻塞健康 executor。
 #
 # 使用方式（decode 节点执行）：
 #   bash decode/trigger_decode_fault.sh
@@ -135,6 +137,7 @@ npu_healthy_state = [
 ]
 
 failed = False
+fault_delivered = False
 for executor_id in range(dp_size):
     its_port = its_port_base + executor_id
     payload = {
@@ -152,24 +155,39 @@ for executor_id in range(dp_size):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        request_timeout = 10 if executor_id == fault_npu else 60
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             print(
                 f"[trigger-decode] executor_id={executor_id} port={its_port} "
                 f"HTTP {resp.status} -> {body}"
             )
+            if executor_id == fault_npu:
+                fault_delivered = True
     except (urllib.error.URLError, OSError) as exc:
-        failed = True
-        print(
-            f"[trigger-decode][ERROR] executor_id={executor_id} "
-            f"port={its_port} POST failed: {exc}"
-        )
+        if executor_id == fault_npu:
+            # 故障 executor 可能永久不可达。健康 executor 的存活组 barrier
+            # 不再需要它参与，所以只告警不阻塞。
+            print(
+                f"[trigger-decode][WARN] fault executor_id={executor_id} "
+                f"port={its_port} POST failed: {exc}; continuing without it."
+            )
+        else:
+            failed = True
+            print(
+                f"[trigger-decode][ERROR] executor_id={executor_id} "
+                f"port={its_port} POST failed: {exc}"
+            )
 
 if failed:
-    print("[trigger-decode] FAILED: at least one decode executor did not accept the strategy.")
+    print("[trigger-decode] FAILED: at least one healthy decode executor did not accept the strategy.")
     sys.exit(1)
 
-print("[trigger-decode] all decode executors accepted the strategy.")
+print("[trigger-decode] all healthy decode executors accepted the strategy.")
+if fault_delivered:
+    print("[trigger-decode] fault executor accepted the scale-to-zero strategy.")
+else:
+    print("[trigger-decode] fault executor was not reachable; healthy executors will continue independently.")
 PY
 RC=$?
 if [[ ${RC} -ne 0 ]]; then
@@ -192,15 +210,14 @@ wait_log_marker() {
 
 echo "[trigger-decode] waiting for full-restart barrier and restart markers ..."
 for ((rank = 0; rank < DECODE_DP_SIZE; rank++)); do
+    if (( rank == DECODE_FAULT_NPU )); then
+        # 故障 executor 不参与存活组 barrier，也不再阻塞本脚本：
+        # 不等待它的任何 marker（永久不可达时同样通过）。
+        continue
+    fi
     log_file="${DECODE_LOG_DIR}/dp${rank}.log"
     wait_log_marker "${log_file}" "restarting workers of EVERY DP instance" || exit 1
-    if (( rank == DECODE_FAULT_NPU )); then
-        # 存活组 barrier 方案（vllm_plugins §4.16）下故障 executor 跳过
-        # barrier，日志是 "Full-restart barrier skipped" 而不是 passed。
-        wait_log_marker "${log_file}" "Full-restart barrier skipped" || exit 1
-    else
-        wait_log_marker "${log_file}" "Full-restart barrier passed" || exit 1
-    fi
+    wait_log_marker "${log_file}" "Full-restart barrier passed" || exit 1
 done
 
 echo "[trigger-decode] waiting for the remaining ${NEW_DECODE_DP} decode engines ..."
@@ -236,4 +253,4 @@ PY
 done
 
 echo "[trigger-decode] decode DP${NEW_DECODE_DP}TP${DECODE_TP_SIZE} restart completed."
-echo "[trigger-decode] fault executor ${DECODE_FAULT_NPU} has been scaled to zero."
+echo "[trigger-decode] healthy executors no longer depend on fault executor ${DECODE_FAULT_NPU}."
