@@ -781,6 +781,12 @@ async def _handle_completions(api: str, request: Request):
                         completion_tokens = (completion_tokens + 1) if stream_flag else \
                             (completion_tokens + usage.get("completion_tokens"))
                         if stop_reason == "recomputed":
+                            logger.warning(
+                                "decoder %s returned stop_reason=recomputed "
+                                "after %d tokens; proxy will resubmit prompt+text",
+                                instance_info.decoder.url,
+                                completion_tokens,
+                            )
                             retry = True
                             retry_count += 1
                             if chat_flag:
