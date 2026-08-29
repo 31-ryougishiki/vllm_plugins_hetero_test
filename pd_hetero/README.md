@@ -26,7 +26,8 @@ pd_hetero/
 ├── check_decode_unchanged.sh       # 场景1校验 D 端健康且未被重启
 ├── decode/
 │   ├── launch_decode_pd.sh         # D 节点启动 dp16/tp1
-│   └── trigger_decode_fault.sh     # 场景2触发 D 端 dp16 -> dp15
+│   ├── trigger_decode_fault.sh     # 场景2触发 D 端 dp16 -> dp15
+│   └── run_decode_fault_alone.sh   # 仅 D 节点单独跑场景2（不依赖 P/代理）
 └── proxy/
     ├── start_proxy_pd.sh           # P 节点启动 PD 代理
     └── load_balance_proxy_server.py
@@ -158,6 +159,17 @@ DECODE_FAULT_NPU=15 bash decode/trigger_decode_fault.sh
 ```
 
 然后 P 节点以 `TRIGGER_MODE=skip` 运行 `run_scenario2.sh`。
+
+只想在 **D 节点单独验证降级**（不需要 P 和代理）时：
+
+```bash
+LOCAL_IP=7.246.78.76 DECODE_FAULT_NPU=15 \
+nohup bash decode/run_decode_fault_alone.sh \
+  > /opt/its/z30055003/logs/decode/run_fault_alone.log 2>&1 &
+```
+
+该脚本直接请求 decode engine（不经 PD 代理），执行
+“基线请求 → 触发降级 → 15 卡健康 → 复测 → 输出对比”。
 
 ### 场景 2 自动执行内容
 
