@@ -80,6 +80,7 @@ PRE_OUTPUT="${SCENARIO_LOG_DIR}/pre_decode_fault.json"
 POST_OUTPUT="${SCENARIO_LOG_DIR}/post_decode_fault.json"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 NEW_DECODE_DP=$((DECODE_DP_SIZE - 1))
+ACTIVE_DECODE_COUNT="${NEW_DECODE_DP}"
 
 export WORK_ROOT MODEL_PATH LOCAL_IP NIC
 export DP_SIZE TP_SIZE NUM_NPUS VLLM_PORT_START ITS_HTTP_PORT_START
@@ -373,21 +374,46 @@ if [[ "${TRIGGER_MODE}" != "ssh" && "${TRIGGER_MODE}" != "local" ]]; then
     sleep "${D_DEGRADE_SETTLE_TIME}"
 fi
 
+# 决策中心可能因专家数整除等约束选择不等于 DP15 的合法拓扑。dc 模式
+# 下以实际 /health 存活数为准，并把所有不可用的 decoder 都从代理摘除。
+if [[ "${TRIGGER_MODE}" == "dc" ]]; then
+    echo "[scenario2] discovering active decode engines after decision-center degrade ..."
+    ACTIVE_DECODE_COUNT=0
+    for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
+        if check_http "${DECODE_HOST}" "$((DECODE_VLLM_PORT_START + dp_rank))" /health; then
+            ACTIVE_DECODE_COUNT=$((ACTIVE_DECODE_COUNT + 1))
+            echo "[scenario2] decode dp${dp_rank}: healthy"
+        else
+            echo "[scenario2] decode dp${dp_rank}: unavailable after degrade"
+        fi
+    done
+    if (( ACTIVE_DECODE_COUNT <= 0 )); then
+        echo "[scenario2][ERROR] no decode engine survived decision-center degrade" >&2
+        exit 1
+    fi
+    echo "[scenario2] decision-center degraded decode: ${ACTIVE_DECODE_COUNT}/${DECODE_DP_SIZE} active"
+fi
+
 # ------------------------------------------------------------------
-# 6. 确认 P 端仍未重启、D 端剩余 15 个 engine 健康。
+# 6. 确认 P 端仍未重启、D 端剩余 engine 健康。
 # ------------------------------------------------------------------
 for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
     wait_http "prefill dp${dp_rank} (unchanged)" "127.0.0.1" \
         "$((VLLM_PORT_START + dp_rank))" /health 120 || exit 1
 done
-for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
-    if (( dp_rank == DECODE_FAULT_NPU )); then
-        continue
-    fi
-    wait_http "decode dp${dp_rank} (after degrade)" "${DECODE_HOST}" \
-        "$((DECODE_VLLM_PORT_START + dp_rank))" /health "${RESTART_TIMEOUT}" || exit 1
-done
-echo "[scenario2] decode remaining engines: ${NEW_DECODE_DP}/${DECODE_DP_SIZE} healthy (fault rank ${DECODE_FAULT_NPU} excluded)"
+if [[ "${TRIGGER_MODE}" == "dc" ]]; then
+    echo "[scenario2] using discovered active count: ${ACTIVE_DECODE_COUNT}"
+else
+    ACTIVE_DECODE_COUNT="${NEW_DECODE_DP}"
+    for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
+        if (( dp_rank == DECODE_FAULT_NPU )); then
+            continue
+        fi
+        wait_http "decode dp${dp_rank} (after degrade)" "${DECODE_HOST}" \
+            "$((DECODE_VLLM_PORT_START + dp_rank))" /health "${RESTART_TIMEOUT}" || exit 1
+    done
+fi
+echo "[scenario2] decode remaining engines: ${ACTIVE_DECODE_COUNT}/${DECODE_DP_SIZE} healthy (fault rank ${DECODE_FAULT_NPU} excluded)"
 
 # ------------------------------------------------------------------
 # 7. 从代理摘除故障 decoder，避免后续请求轮询到空转 executor。
@@ -397,10 +423,26 @@ echo "[scenario2] removing fault decoder ${DECODE_HOST}:${FAULT_DECODE_PORT} fro
 remove_proxy_instance "${DECODE_HOST}" "${FAULT_DECODE_PORT}" \
     | tee -a "${SCENARIO_LOG_DIR}/proxy_remove.log"
 
+if [[ "${TRIGGER_MODE}" == "dc" ]]; then
+    # 决策中心可能额外关闭若干 decoder（例如为满足 expert_num 整除）。
+    # 所有 /health 不可用的 decoder 都要摘除，避免代理轮询到空转 engine。
+    for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
+        if (( dp_rank == DECODE_FAULT_NPU )); then
+            continue
+        fi
+        if ! check_http "${DECODE_HOST}" "$((DECODE_VLLM_PORT_START + dp_rank))" /health; then
+            echo "[scenario2] removing unavailable decoder dp${dp_rank} from proxy ..."
+            remove_proxy_instance "${DECODE_HOST}" \
+                "$((DECODE_VLLM_PORT_START + dp_rank))" \
+                | tee -a "${SCENARIO_LOG_DIR}/proxy_remove.log"
+        fi
+    done
+fi
+
 # ------------------------------------------------------------------
 # 8. D 降级后的复测请求。
 # ------------------------------------------------------------------
-WARMUP_REQUESTS="${NEW_DECODE_DP}"
+WARMUP_REQUESTS="${ACTIVE_DECODE_COUNT}"
 run_warmup "post_degrade" || exit 1
 echo "[scenario2] post-degrade request (DP15TP1 decode) ..."
 if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
