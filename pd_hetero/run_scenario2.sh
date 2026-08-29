@@ -62,6 +62,7 @@ START_PREFILL="${START_PREFILL:-1}"
 START_PROXY="${START_PROXY:-1}"
 TRIGGER_MODE="${TRIGGER_MODE:-ssh}"
 SSH_DECODE="${SSH_DECODE:-}"
+DECISION_CENTER_URL="${DECISION_CENTER_URL:-http://7.246.78.79:8088}"
 REQUIRE_OUTPUT_MATCH="${REQUIRE_OUTPUT_MATCH:-1}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
 WARMUP_RETRIES="${WARMUP_RETRIES:-30}"
@@ -328,6 +329,38 @@ case "${TRIGGER_MODE}" in
         ;;
     skip)
         echo "[scenario2] TRIGGER_MODE=skip: assuming decode fault was already triggered"
+        ;;
+    dc)
+        echo "[scenario2] trigger mode=decision_center url=${DECISION_CENTER_URL}"
+        if ! "${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${DECODE_HOST}" \
+                "${DECODE_FAULT_NPU}" <<'PY'
+import json
+import sys
+import urllib.request
+
+url, node_ip, npu_id = sys.argv[1], sys.argv[2], sys.argv[3]
+payload = {"node_ip": node_ip, "npu_id": str(npu_id), "fault_code": "80E78000"}
+data = json.dumps(payload).encode("utf-8")
+req = urllib.request.Request(
+    f"{url.rstrip('/')}/api/v1/decision_center/test/trigger_fault",
+    data=data,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(req, timeout=60) as resp:
+    body = resp.read().decode("utf-8", errors="replace")
+print(f"HTTP {resp.status} -> {body}")
+if resp.status != 200:
+    sys.exit(1)
+PY
+        then
+            echo "[scenario2] decision center accepted decode fault" \
+                | tee "${SCENARIO_LOG_DIR}/trigger_dc.log"
+        else
+            echo "[scenario2][ERROR] decision center trigger_fault failed" >&2
+            exit 1
+        fi
         ;;
     *)
         echo "[scenario2][ERROR] unknown TRIGGER_MODE=${TRIGGER_MODE}" >&2

@@ -9,6 +9,7 @@
 | `trigger_hetero_restart.sh` | 模拟 NPU 卡故障，向 4 个 executor 手动下发 `DP4TP(3,4,4,4)` 异构策略 |
 | `trigger_prefill_recover.sh` | 向 4 个 executor 下发 `RECOVER`，恢复对称 `DP4TP4` |
 | `pd_hetero/` | PD 分离场景 1/2/3：P 转异构、D 缩容、RECOVER 恢复，详见 `pd_hetero/README.md` |
+| `decision_center/` | 通过 `7.246.78.79:8088` 决策中心触发场景 1/2/3 的启动/故障/恢复脚本，详见 `decision_center/README.md` |
 
 假设远程工作路径：`/opt/its/z30055003`。
 

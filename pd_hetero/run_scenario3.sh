@@ -65,6 +65,9 @@ PROXY_API_HOST="${PROXY_API_HOST:-127.0.0.1}"
 RECOVER_TARGET="${RECOVER_TARGET:-both}"
 TRIGGER_MODE="${TRIGGER_MODE:-ssh}"
 SSH_DECODE="${SSH_DECODE:-}"
+DECISION_CENTER_URL="${DECISION_CENTER_URL:-http://7.246.78.79:8088}"
+FAULT_NPU="${FAULT_NPU:-3}"
+FAULT_NODE_IP="${FAULT_NODE_IP:-${LOCAL_IP}}"
 REQUIRE_OUTPUT_MATCH="${REQUIRE_OUTPUT_MATCH:-1}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
 WARMUP_RETRIES="${WARMUP_RETRIES:-30}"
@@ -96,6 +99,11 @@ case "${RECOVER_TARGET}" in
         exit 1
         ;;
 esac
+
+# decision_center 模式且恢复 both 时，必须在**一次** repair/devices 里把
+# 服务下所有坏卡都报给决策中心；否则第一次 repair 后决策中心发现服务仍
+# 有坏卡，不会下发 RECOVER。
+DC_REPAIR_SENT=0
 
 # 默认基线按恢复范围选择：
 # - both：场景1降级前的对称 P + 16 decoder；
@@ -292,16 +300,57 @@ if [[ "${DO_PREFILL}" == "1" ]]; then
     done
 
     echo "[scenario3] triggering prefill RECOVER DP4TP(3,4,4,4) -> DP4TP4 ..."
-    if ! LOCAL_IP="${LOCAL_IP}" \
-            ITS_HTTP_PORT_START="${ITS_HTTP_PORT_START}" \
-            DP_SIZE="${DP_SIZE}" \
-            TP_SIZE="${TP_SIZE}" \
-            NUM_NPUS="${NUM_NPUS}" \
-            DEPLOY_TYPE=RECOVER \
-            bash "${ROOT_SCRIPT_DIR}/trigger_prefill_recover.sh" \
-            | tee "${SCENARIO_LOG_DIR}/trigger_prefill_recover.log"; then
-        echo "[scenario3][ERROR] prefill RECOVER trigger failed" >&2
-        exit 1
+    if [[ "${TRIGGER_MODE}" == "dc" ]]; then
+        if ! "${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${FAULT_NODE_IP}" \
+                "${FAULT_NPU}" "${DECODE_HOST}" "${DECODE_FAULT_NPU}" \
+                "${DO_DECODE}" <<'PY'
+import json
+import sys
+import urllib.request
+
+url = sys.argv[1]
+p_node, p_npu = sys.argv[2], sys.argv[3]
+d_node, d_npu = sys.argv[4], sys.argv[5]
+include_decode = sys.argv[6] == "1"
+
+payload = [{"node_ip": p_node, "npu_id": str(p_npu)}]
+if include_decode:
+    payload.append({"node_ip": d_node, "npu_id": str(d_npu)})
+data = json.dumps(payload).encode("utf-8")
+req = urllib.request.Request(
+    f"{url.rstrip('/')}/api/v1/decision_center/repair/devices",
+    data=data,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(req, timeout=60) as resp:
+    body = resp.read().decode("utf-8", errors="replace")
+print(f"HTTP {resp.status} -> {body}")
+if resp.status != 200:
+    sys.exit(1)
+PY
+        then
+            DC_REPAIR_SENT=1
+            echo "[scenario3] decision center accepted repair: ${FAULT_NODE_IP}/${FAULT_NPU}" \
+                "$( [[ ${DO_DECODE} -eq 1 ]] && echo + ${DECODE_HOST}/${DECODE_FAULT_NPU} || true )" \
+                | tee "${SCENARIO_LOG_DIR}/trigger_prefill_recover.log"
+        else
+            echo "[scenario3][ERROR] decision center repair/devices failed" >&2
+            exit 1
+        fi
+    else
+        if ! LOCAL_IP="${LOCAL_IP}" \
+                ITS_HTTP_PORT_START="${ITS_HTTP_PORT_START}" \
+                DP_SIZE="${DP_SIZE}" \
+                TP_SIZE="${TP_SIZE}" \
+                NUM_NPUS="${NUM_NPUS}" \
+                DEPLOY_TYPE=RECOVER \
+                bash "${ROOT_SCRIPT_DIR}/trigger_prefill_recover.sh" \
+                | tee "${SCENARIO_LOG_DIR}/trigger_prefill_recover.log"; then
+            echo "[scenario3][ERROR] prefill RECOVER trigger failed" >&2
+            exit 1
+        fi
     fi
 
     echo "[scenario3] waiting for prefill symmetric recovery ..."
@@ -365,6 +414,40 @@ if [[ "${DO_DECODE}" == "1" ]]; then
                     bash "${SCRIPT_DIR}/decode/trigger_decode_recover.sh" \
                     | tee "${SCENARIO_LOG_DIR}/trigger_decode_recover.log"; then
                 echo "[scenario3][ERROR] local decode RECOVER trigger failed" >&2
+                exit 1
+            fi
+            ;;
+        dc)
+            echo "[scenario3] trigger mode=decision_center url=${DECISION_CENTER_URL}"
+            if [[ "${DC_REPAIR_SENT}" == "1" ]]; then
+                echo "[scenario3] decode repair already included in combined repair request, skip second POST"
+            elif ! "${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${DECODE_HOST}" \
+                    "${DECODE_FAULT_NPU}" <<'PY'
+import json
+import sys
+import urllib.request
+
+url, node_ip, npu_id = sys.argv[1], sys.argv[2], sys.argv[3]
+payload = [{"node_ip": node_ip, "npu_id": str(npu_id)}]
+data = json.dumps(payload).encode("utf-8")
+req = urllib.request.Request(
+    f"{url.rstrip('/')}/api/v1/decision_center/repair/devices",
+    data=data,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(req, timeout=60) as resp:
+    body = resp.read().decode("utf-8", errors="replace")
+print(f"HTTP {resp.status} -> {body}")
+if resp.status != 200:
+    sys.exit(1)
+PY
+            then
+                echo "[scenario3] decision center accepted decode repair" \
+                    | tee "${SCENARIO_LOG_DIR}/trigger_decode_recover.log"
+            else
+                echo "[scenario3][ERROR] decision center repair/devices failed" >&2
                 exit 1
             fi
             ;;

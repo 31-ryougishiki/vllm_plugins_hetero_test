@@ -54,6 +54,9 @@ START_PREFILL="${START_PREFILL:-1}"
 START_PROXY="${START_PROXY:-1}"
 FAULT_NPU="${FAULT_NPU:-3}"
 DEPLOY_TYPE="${DEPLOY_TYPE:-PD_REBUILD}"
+TRIGGER_MODE="${TRIGGER_MODE:-manual}"
+DECISION_CENTER_URL="${DECISION_CENTER_URL:-http://7.246.78.79:8088}"
+FAULT_NODE_IP="${FAULT_NODE_IP:-${LOCAL_IP}}"
 REQUIRE_OUTPUT_MATCH="${REQUIRE_OUTPUT_MATCH:-1}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
 WARMUP_RETRIES="${WARMUP_RETRIES:-30}"
@@ -279,18 +282,59 @@ for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
 done
 
 echo "[scenario1] triggering prefill DP4TP4 -> DP4TP(3,4,4,4) ..."
-if ! LOCAL_IP="${LOCAL_IP}" \
-        ITS_HTTP_PORT_START="${ITS_HTTP_PORT_START}" \
-        DP_SIZE="${DP_SIZE}" \
-        TP_SIZE="${TP_SIZE}" \
-        NUM_NPUS="${NUM_NPUS}" \
-        FAULT_NPU="${FAULT_NPU}" \
-        DEPLOY_TYPE="${DEPLOY_TYPE}" \
-        bash "${ROOT_SCRIPT_DIR}/trigger_hetero_restart.sh" \
-        | tee "${SCENARIO_LOG_DIR}/trigger.log"; then
-    echo "[scenario1][ERROR] trigger_hetero_restart.sh failed" >&2
-    exit 1
-fi
+case "${TRIGGER_MODE}" in
+    dc)
+        echo "[scenario1] trigger mode=decision_center url=${DECISION_CENTER_URL}"
+        if ! "${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${FAULT_NODE_IP}" \
+                "${FAULT_NPU}" <<'PY'
+import json
+import sys
+import urllib.request
+
+url, node_ip, npu_id = sys.argv[1], sys.argv[2], sys.argv[3]
+payload = {"node_ip": node_ip, "npu_id": str(npu_id), "fault_code": "80E78000"}
+data = json.dumps(payload).encode("utf-8")
+req = urllib.request.Request(
+    f"{url.rstrip('/')}/api/v1/decision_center/test/trigger_fault",
+    data=data,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(req, timeout=60) as resp:
+    body = resp.read().decode("utf-8", errors="replace")
+print(f"HTTP {resp.status} -> {body}")
+if resp.status != 200:
+    sys.exit(1)
+PY
+        then
+            echo "[scenario1] decision center accepted prefill fault" \
+                | tee "${SCENARIO_LOG_DIR}/trigger_dc.log"
+        else
+            echo "[scenario1][ERROR] decision center trigger_fault failed" >&2
+            exit 1
+        fi
+        ;;
+    manual)
+        echo "[scenario1] trigger mode=manual (direct executor POST)"
+        if ! LOCAL_IP="${LOCAL_IP}" \
+                ITS_HTTP_PORT_START="${ITS_HTTP_PORT_START}" \
+                DP_SIZE="${DP_SIZE}" \
+                TP_SIZE="${TP_SIZE}" \
+                NUM_NPUS="${NUM_NPUS}" \
+                FAULT_NPU="${FAULT_NPU}" \
+                DEPLOY_TYPE="${DEPLOY_TYPE}" \
+                bash "${ROOT_SCRIPT_DIR}/trigger_hetero_restart.sh" \
+                | tee "${SCENARIO_LOG_DIR}/trigger.log"; then
+            echo "[scenario1][ERROR] trigger_hetero_restart.sh failed" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "[scenario1][ERROR] unknown TRIGGER_MODE=${TRIGGER_MODE}" >&2
+        exit 1
+        ;;
+esac
 
 # ------------------------------------------------------------------
 # 6. 等待 P 端完成全量重启、KV cache 重建与 Mooncake 元数据恢复。

@@ -112,11 +112,14 @@ launch_engine() {
     local vllm_port="$3"
 
     local log_file="${LOG_DIR}/dp${dp_rank}.log"
-    echo "[decode] dp_rank=${dp_rank} device=${visible_devices} port=${vllm_port}"
+    # 决策中心要求同一服务的所有 executor 上报相同的 VLLM_SERVICE_ID。
+    # 默认保留旧的手动测试行为；decision_center/ 启动脚本会显式传入。
+    local service_id="${VLLM_SERVICE_ID:-pd-hetero-decode-dp${dp_rank}}"
+    echo "[decode] dp_rank=${dp_rank} device=${visible_devices} port=${vllm_port} service_id=${service_id}"
 
     nohup env \
         ASCEND_RT_VISIBLE_DEVICES="${visible_devices}" \
-        VLLM_SERVICE_ID="pd-hetero-decode-dp${dp_rank}" \
+        VLLM_SERVICE_ID="${service_id}" \
         "${PYTHON_BIN}" -m vllm.entrypoints.openai.api_server \
             --model "${MODEL_PATH}" \
             --host 0.0.0.0 \
