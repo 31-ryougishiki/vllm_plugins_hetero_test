@@ -56,6 +56,10 @@ FAULT_NPU="${FAULT_NPU:-3}"
 DEPLOY_TYPE="${DEPLOY_TYPE:-PD_REBUILD}"
 REQUIRE_OUTPUT_MATCH="${REQUIRE_OUTPUT_MATCH:-1}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
+WARMUP_RETRIES="${WARMUP_RETRIES:-30}"
+WARMUP_INTERVAL="${WARMUP_INTERVAL:-10}"
+REQUEST_TEMPERATURE="${REQUEST_TEMPERATURE:-0.0}"
+REQUEST_SEED="${REQUEST_SEED:-1024}"
 PROMPT="${PROMPT:-请解释一下量子计算的基本原理。量子计算的基本原理是：}"
 MAX_TOKENS="${MAX_TOKENS:-100}"
 
@@ -136,6 +140,41 @@ wait_log_marker() {
     return 1
 }
 
+# 在正式基线/复测请求前先发短请求，等待 PD 链路完成首次握手。
+# 首次请求可能返回 stop_reason=recomputed（D 端尚未拿到远端 KV），代理会
+# 用“原 prompt + 已生成文本”重新走一遍，容易把两段续推拼进 choices[0].text，
+# 造成输出看起来像“正确文本 + 无关数据”。warmup 吸收掉这次 recompute。
+run_warmup() {
+    local label="$1"
+    local log_file="${SCENARIO_LOG_DIR}/${label}_warmup.log"
+    echo "[scenario1] ${label}: warming up PD chain (max ${WARMUP_RETRIES} attempts)"
+    for attempt in $(seq 1 "${WARMUP_RETRIES}"); do
+        if "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
+                --url "${PROXY_URL}" \
+                --model dsv4 \
+                --prompt "${PROMPT}" \
+                --max-tokens 8 \
+                --temperature "${REQUEST_TEMPERATURE}" \
+                --seed "${REQUEST_SEED}" \
+                --output "${SCENARIO_LOG_DIR}/${label}_warmup.json" \
+                --timeout 300 \
+                > "${log_file}" 2>&1; then
+            finish="$(grep '^FINISH_REASON=' "${log_file}" | tail -n 1 || true)"
+            echo "[scenario1] ${label}: warmup attempt=${attempt} ${finish}"
+            if [[ "${finish}" != "FINISH_REASON=recomputed" ]]; then
+                echo "[scenario1] ${label}: PD chain warmup completed"
+                return 0
+            fi
+        else
+            echo "[scenario1] ${label}: warmup attempt=${attempt} failed"
+        fi
+        sleep "${WARMUP_INTERVAL}"
+    done
+    echo "[scenario1][ERROR] ${label}: PD chain did not become ready" >&2
+    tail -n 20 "${log_file}" >&2 || true
+    return 1
+}
+
 all_http_ready() {
     local host="$1"
     local port_start="$2"
@@ -195,12 +234,15 @@ wait_http "proxy" "${PROXY_HOST}" "${PROXY_PORT}" /healthcheck 120 || exit 1
 # ------------------------------------------------------------------
 # 4. 异构触发前的基线请求（对称 P + 不变 D）。
 # ------------------------------------------------------------------
+run_warmup "baseline" || exit 1
 echo "[scenario1] baseline request (symmetric prefill) ..."
 if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
         --url "${PROXY_URL}" \
         --model dsv4 \
         --prompt "${PROMPT}" \
         --max-tokens "${MAX_TOKENS}" \
+        --temperature "${REQUEST_TEMPERATURE}" \
+        --seed "${REQUEST_SEED}" \
         --output "${PRE_OUTPUT}" \
         --timeout 600 \
         > "${SCENARIO_LOG_DIR}/pre_request.log" 2>&1; then
@@ -253,11 +295,14 @@ echo "[scenario1] decode side still healthy after prefill restart (unchanged)"
 # 7. 异构重启后的复测请求。
 # ------------------------------------------------------------------
 echo "[scenario1] post-restart request (heterogeneous prefill) ..."
+run_warmup "post_restart" || exit 1
 if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
         --url "${PROXY_URL}" \
         --model dsv4 \
         --prompt "${PROMPT}" \
         --max-tokens "${MAX_TOKENS}" \
+        --temperature "${REQUEST_TEMPERATURE}" \
+        --seed "${REQUEST_SEED}" \
         --output "${POST_OUTPUT}" \
         --timeout 600 \
         > "${SCENARIO_LOG_DIR}/post_request.log" 2>&1; then

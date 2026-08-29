@@ -130,6 +130,8 @@ bash check_decode_unchanged.sh
 | `PROXY_PORT` | 8000 | PD 代理端口 |
 | `FAULT_NPU` | 3 | 模拟故障卡，必须在 DP0 的 NPU 0..3 |
 | `REQUIRE_OUTPUT_MATCH` | 1 | 1=异构前后输出必须完全一致；0=仅要求非空 |
+| `REQUEST_TEMPERATURE` / `REQUEST_SEED` | 0.0 / 1024 | 请求采样参数；0=贪心解码，保证两次独立请求可比较 |
+| `WARMUP_RETRIES` / `WARMUP_INTERVAL` | 30 / 10 | 正式请求前 PD 链路预热次数与间隔，吸收首次 `recomputed` |
 | `START_PREFILL` / `START_PROXY` | 1 | 编排脚本是否自动拉起 P / 代理 |
 | `RESTART_TIMEOUT` | 900 | 等待全量重启/KV 恢复的超时秒数 |
 

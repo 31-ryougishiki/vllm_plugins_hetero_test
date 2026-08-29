@@ -39,6 +39,14 @@ def parse_args() -> argparse.Namespace:
         default="请解释一下量子计算的基本原理。量子计算的基本原理是：",
     )
     parser.add_argument("--max-tokens", type=int, default=100)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="sampling temperature; 0 uses greedy decoding so separate "
+        "pre/post requests are deterministic and comparable",
+    )
+    parser.add_argument("--seed", type=int, default=1024)
     parser.add_argument("--output", default=None, help="save raw JSON here")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument(
@@ -58,6 +66,8 @@ def main() -> int:
         "model": args.model,
         "prompt": args.prompt,
         "max_tokens": args.max_tokens,
+        "temperature": args.temperature,
+        "seed": args.seed,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
