@@ -1,6 +1,26 @@
 # vllm_plugins 异构重启测试脚本
 
-本目录包含基础测试脚本和 PD 分离场景脚本：
+本目录包含基础测试脚本和 PD 分离场景脚本。
+
+## 场景清单（当前共 3 个 PD 场景）
+
+| 场景 | 拓扑变化 | 说明 |
+|---|---|---|
+| 场景 1 | P：`DP4TP4 -> DP4TP(3,4,4,4)`；D 不变 | prefill 坏 1 卡转异构 |
+| 场景 2 | P 不变；D：`DP16TP1 -> DP15TP1` | decode 坏 1 卡缩容（决策中心可能选择其它合法 DP 数） |
+| 场景 3 | P：异构恢复 `DP4TP4`；D：`DP15TP1 -> DP16TP1` | RECOVER，支持 `RECOVER_TARGET=both/prefill/decode` |
+
+- 每个场景都有两种触发方式：**手动直连 executor** 与
+  **DecisionMakingCenter**（`http://7.246.78.79:8088`）触发；
+  决策中心方式见 `decision_center/README.md`，或在场景脚本里设
+  `TRIGGER_MODE=dc`。
+- D 单机版 `run_decode_fault_alone.sh` / `run_decode_recover_alone.sh`
+  分别是场景 2 / 场景 3 的子测试，不算新增场景编号。
+- **hetero_cp 只适配场景 1**（启动即 `DP4TP(3,4,4,4)`），尚未适配
+  场景 2 / 场景 3 / 决策中心控制面，因此只能作为场景 1 数据面的 golden
+  reference。
+
+基础脚本与目录：
 
 | 脚本/目录 | 作用 |
 |------|------|

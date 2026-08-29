@@ -1,10 +1,20 @@
 # PD 分离测试场景（MooncakeHybridConnector）
 
-本目录提供三个 PD 分离测试场景：
+本目录提供 **3 个 PD 分离测试场景**：
 
-- 场景 1：prefill 节点坏 1 卡转异构，decode 节点保持不变；
-- 场景 2：decode 节点坏 1 卡缩容，prefill 节点保持不变；
-- 场景 3：RECOVER，把场景 1/2 的降级拓扑恢复回对称 DP4TP4 + DP16TP1。
+| 场景 | 拓扑变化 | 触发方式 |
+|---|---|---|
+| 场景 1 | P `DP4TP4 -> DP4TP(3,4,4,4)`，D `DP16TP1` 不变 | 手动 `trigger_hetero_restart.sh` / 决策中心 `run_scenario1_dc.sh` |
+| 场景 2 | D `DP16TP1 -> DP15TP1`，P `DP4TP4` 不变 | 手动 `decode/trigger_decode_fault.sh` / 决策中心 `run_scenario2_dc.sh` |
+| 场景 3 | P 恢复 `DP4TP4`，D 恢复 `DP16TP1` | 手动 `trigger_prefill_recover.sh` + `decode/trigger_decode_recover.sh` / 决策中心 `run_scenario3_dc.sh` |
+
+- 手动直连 executor 与 DecisionMakingCenter 只是**触发方式**，不是新增
+  场景编号；
+- D 单机版 `run_decode_fault_alone.sh` / `run_decode_recover_alone.sh`
+  分别是场景 2 / 场景 3 的子测试；
+- **hetero_cp 只适配场景 1**（启动即异构 `DP4TP(3,4,4,4)`），尚未适配
+  场景 2 / 场景 3 / 决策中心控制面；场景 2/3 没有 hetero_cp golden，
+  只能与场景 1/2 的基线输出做一致性校验。
 
 如需由决策中心（`http://7.246.78.79:8088`）触发扩缩容而不是手动 POST
 executor，请使用根目录的 `decision_center/` 脚本，或在场景脚本里设置
@@ -17,8 +27,10 @@ executor，请使用根目录的 `decision_center/` 脚本，或在场景脚本�
 - `hetero_cp/run_script_hetero/proxy.sh` + `load_balance_proxy_server_example.py`
   对应本目录的 PD 负载均衡代理。
 
-差异点：hetero_cp 是**启动期异构**；vllm_plugins 的测试路径是
-**对称 DP4TP4 启动 → 运行时触发 DP4TP(3,4,4,4) 重启**。
+差异点：hetero_cp 是**启动期异构**，且只覆盖场景 1 的目标拓扑；
+vllm_plugins 的测试路径是
+**对称 DP4TP4 启动 → 运行时触发 DP4TP(3,4,4,4) 重启**，并继续支持
+场景 2 / 场景 3。
 
 ## 目录内容
 
