@@ -92,9 +92,14 @@ def main() -> int:
     usage = response.get("usage") or {}
     completion_tokens = int(usage.get("completion_tokens", 0))
     finish_reason = choice.get("finish_reason")
+    # vllm-ascend 的 recompute 信号：finish_reason 保持 stop，实际原因在
+    # stop_reason（"recomputed"）。编排脚本用它判断 KV 链路是否仍在首次
+    # recompute 状态。
+    stop_reason = choice.get("stop_reason")
 
     print("RESULT_TEXT=" + text)
     print(f"FINISH_REASON={finish_reason}")
+    print(f"STOP_REASON={stop_reason}")
     print(f"COMPLETION_TOKENS={completion_tokens}")
 
     if args.output:

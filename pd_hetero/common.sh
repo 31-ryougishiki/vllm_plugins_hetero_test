@@ -27,6 +27,58 @@ log() { echo "${TAG_PREFIX} $*"; }
 log_err() { echo "${TAG_PREFIX}[ERROR] $*" >&2; }
 log_warn() { echo "${TAG_PREFIX}[WARN] $*" >&2; }
 
+# 检查本节点已运行的 vllm api_server 进程是否使用了决策中心注册所需的
+# VLLM_ITS_DECISION_CENTER_URL / VLLM_SERVICE_ID。dc 模式下只看 /health
+# 无法证明 executor 已注册，/proc/<pid>/environ 至少能证明启动环境正确；
+# 读不到环境时 fail-closed，调用方可显式 ASSUME_DC_REGISTERED=1。
+# 用法：dc_registration_env_ok <decision_center_url> <service_id> <min_pids>
+dc_registration_env_ok() {
+    local expected_url="$1"
+    local expected_service="$2"
+    local min_pids="$3"
+    "${PYTHON_BIN}" - "${expected_url}" "${expected_service}" "${min_pids}" <<'PY'
+import os
+import sys
+
+expected_url, expected_service, min_pids = sys.argv[1], sys.argv[2], int(sys.argv[3])
+matched = 0
+readable = 0
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    pid_dir = f"/proc/{name}"
+    try:
+        with open(f"{pid_dir}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace"
+            )
+        if "vllm.entrypoints.openai.api_server" not in cmdline:
+            continue
+        with open(f"{pid_dir}/environ", "rb") as f:
+            raw = f.read()
+        readable += 1
+    except (OSError, PermissionError):
+        continue
+    env = {}
+    for item in raw.split(b"\x00"):
+        if not item:
+            continue
+        key, _, value = item.partition(b"=")
+        env[key.decode(errors="replace")] = value.decode(errors="replace")
+    if (
+        env.get("VLLM_ITS_DECISION_CENTER_URL", "").rstrip("/") == expected_url.rstrip("/")
+        and env.get("VLLM_SERVICE_ID") == expected_service
+    ):
+        matched += 1
+
+print(
+    f"{sys.argv[0]}: dc registration env check matched={matched} "
+    f"readable={readable} min_pids={min_pids}"
+)
+sys.exit(0 if matched >= min_pids else 1)
+PY
+}
+
 # 检查一个 HTTP 端点是否为 200。用法：check_http <host> <port> [path]
 check_http() {
     local host="$1"
@@ -43,6 +95,35 @@ try:
         sys.exit(0 if resp.status == 200 else 1)
 except Exception:
     sys.exit(1)
+PY
+}
+
+# 读取 executor ITS /status 中的一个字段。失败时返回空串。
+# 用法：its_status_field <host> <port> <field>
+its_status_field() {
+    local host="$1"
+    local port="$2"
+    local field="$3"
+    "${PYTHON_BIN}" - "${host}" "${port}" "${field}" <<'PY'
+import json
+import sys
+import urllib.request
+
+host, port, field = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    with opener.open(f"http://{host}:{port}/api/v1/executor/status",
+                     timeout=5) as resp:
+        if resp.status != 200:
+            sys.exit(0)
+        data = json.loads(resp.read().decode("utf-8", errors="replace"))
+except Exception:
+    sys.exit(0)
+
+value = data.get(field)
+if value is None:
+    sys.exit(0)
+print(value)
 PY
 }
 
@@ -65,21 +146,74 @@ wait_http() {
     return 1
 }
 
-# 轮询等待日志中出现 marker。用法：wait_log_marker <label> <log_file> <marker> [timeout]
+# 计算日志中一组 marker 的当前总行数。
+# 用法：log_marker_count <log_file> <marker> [alt_marker...]
+log_marker_count() {
+    local log_file="$1"
+    local marker="$2"
+    shift 2
+    local -a grep_args=("-c" "-e" "${marker}")
+    local alt
+    for alt in "$@"; do
+        [[ -n "${alt}" ]] && grep_args+=("-e" "${alt}")
+    done
+    local count
+    count="$(grep "${grep_args[@]}" "${log_file}" 2>/dev/null || true)"
+    count="${count//[^0-9]/}"
+    [[ -n "${count}" ]] || count=0
+    echo "${count}"
+}
+
+# 轮询等待日志中出现【新的】marker。
+# 用法：wait_log_marker <label> <log_file> <marker> [timeout] [baseline] [alt_marker...]
+# 以 baseline 为比较起点，只有计数增长才算等待成功。省略 baseline 时用
+# 调用时刻的计数做基线（保留旧行为）。重复下发同一份策略时 executor 幂等
+# 短路，日志会打印 "skipping redundant worker restart" 而不是再次重启；
+# alt_marker 用于把该幂等日志也视为等待成功。
+#
+# 注意：幂等短路日志可能在调用本函数之前就已经写入，因此需要"等待策略
+# 下发之前"的计数时，调用方必须在触发前用 log_marker_count 快照，并把该
+# 值作为 baseline 传入；否则策略执行快于第一次计数时会误超时。
 wait_log_marker() {
     local label="$1"
     local log_file="$2"
     local marker="$3"
     local timeout="${4:-600}"
-    log "wait ${label} marker in ${log_file}"
+    shift 4
+    # 兼容两种调用：旧式 [alt_marker...]；新式 [baseline] [alt_marker...]。
+    # 第 5 个参数是纯数字（或空串）时按 baseline 解析。
+    local baseline=""
+    local -a grep_args=("-c" "-e" "${marker}")
+    if [[ "$#" -ge 1 && ( -z "${1}" || "${1}" =~ ^[0-9]+$ ) ]]; then
+        baseline="${1}"
+        shift
+    fi
+    local alt
+    for alt in "$@"; do
+        [[ -n "${alt}" ]] && grep_args+=("-e" "${alt}")
+    done
+
+    local before
+    if [[ -n "${baseline}" ]]; then
+        before="${baseline}"
+    else
+        before="$(grep "${grep_args[@]}" "${log_file}" 2>/dev/null || true)"
+        before="${before//[^0-9]/}"
+        [[ -n "${before}" ]] || before=0
+    fi
+    log "wait ${label} new marker in ${log_file} (baseline count=${before})"
     for _attempt in $(seq 1 $((timeout / 2))); do
-        if grep -q "${marker}" "${log_file}" 2>/dev/null; then
-            log "${label}: found '${marker}'"
+        local now
+        now="$(grep "${grep_args[@]}" "${log_file}" 2>/dev/null || true)"
+        now="${now//[^0-9]/}"
+        [[ -n "${now}" ]] || now=0
+        if [[ "${now}" -gt "${before}" ]]; then
+            log "${label}: found new '${marker}' (${before} -> ${now})"
             return 0
         fi
         sleep 2
     done
-    log_err "timeout waiting for '${marker}' in ${log_file}"
+    log_err "timeout waiting for new '${marker}' in ${log_file} (baseline count=${before})"
     return 1
 }
 
@@ -120,8 +254,12 @@ run_warmup() {
                 --output "${SCENARIO_LOG_DIR}/${label}_warmup_${successes}.json" \
                 --timeout 300 \
                 > "${log_file}" 2>&1; then
+            # vllm-ascend 的 recompute 信号在 stop_reason 字段（finish_reason
+            # 仍为 stop），只查 FINISH_REASON 永远匹配不到 "recomputed"。
             finish="$(grep '^FINISH_REASON=' "${log_file}" | tail -n 1 || true)"
-            if [[ "${finish}" == "FINISH_REASON=recomputed" ]]; then
+            stop_reason="$(grep '^STOP_REASON=' "${log_file}" | tail -n 1 || true)"
+            if [[ "${finish}" == "FINISH_REASON=recomputed" \
+                  || "${stop_reason}" == "STOP_REASON=recomputed" ]]; then
                 log "${label}: warmup attempt=${attempt} still recomputed"
                 sleep "${WARMUP_INTERVAL:-10}"
                 continue
@@ -168,7 +306,9 @@ send_request() {
 
 # 比较前后两次请求的 choices[0].text。
 # 用法：compare_outputs <pre_json> <post_json> <require_match(0|1)> <fail_msg> <pass_msg>
-# 基线文件缺失时自动降级为“只校验非空”（与原场景 3 行为一致）。
+# require_match=1 时基线必须存在；text 必须相同，且 stop_reason 不能是
+# recomputed、pre/post 的 finish_reason 不能漂移，避免“文本碰巧相同”掩盖
+# 未恢复的 KV 链路。
 compare_outputs() {
     local pre_path="$1"
     local post_path="$2"
@@ -176,8 +316,9 @@ compare_outputs() {
     local fail_msg="$4"
     local pass_msg="$5"
     if [[ "${require_match}" == "1" && ! -f "${pre_path}" ]]; then
-        log_warn "baseline ${pre_path} not found; only checking non-empty output"
-        require_match=0
+        log_err "baseline ${pre_path} not found; refusing to report PASS " \
+            "for a text-match scenario without a baseline"
+        return 2
     fi
     log "comparing outputs: ${post_path} vs ${pre_path}"
     "${PYTHON_BIN}" - "${pre_path}" "${post_path}" "${require_match}" \
@@ -191,19 +332,23 @@ require_match = require_match == "1"
 post = json.load(open(post_path, encoding="utf-8"))
 post_text = (post.get("choices") or [{}])[0].get("text") or ""
 post_reason = (post.get("choices") or [{}])[0].get("finish_reason")
+post_stop = (post.get("choices") or [{}])[0].get("stop_reason")
 pre_text = None
 pre_reason = None
+pre_stop = None
 
 if require_match:
     pre = json.load(open(pre_path, encoding="utf-8"))
     pre_text = (pre.get("choices") or [{}])[0].get("text") or ""
     pre_reason = (pre.get("choices") or [{}])[0].get("finish_reason")
+    pre_stop = (pre.get("choices") or [{}])[0].get("stop_reason")
     print(f"PRE_TEXT={pre_text!r}")
 else:
-    print("PRE_TEXT=<skipped: no baseline or match disabled>")
+    print("PRE_TEXT=<skipped: match disabled>")
 
 print(f"POST_TEXT={post_text!r}")
-print(f"PRE_FINISH={pre_reason} POST_FINISH={post_reason}")
+print(f"PRE_FINISH={pre_reason} PRE_STOP={pre_stop} "
+      f"POST_FINISH={post_reason} POST_STOP={post_stop}")
 print(f"MATCH={pre_text == post_text if pre_text is not None else 'N/A'}")
 
 if not post_text:
@@ -213,6 +358,17 @@ if require_match and pre_text is not None and pre_text != post_text:
     print(f"[FAIL] {fail_msg}")
     sys.exit(2)
 if require_match:
+    # 文本相同但 stop_reason 仍是 recompute 时说明 KV 链路没有真正恢复
+    # （warmup 未生效）；pre/post finish_reason 不同也说明行为发生漂移。
+    # 两者同时为 length 只代表按 max_tokens 截断，不判失败。
+    for label, stop in (("PRE", pre_stop), ("POST", post_stop)):
+        if stop == "recomputed":
+            print(f"[FAIL] {fail_msg}: {label} stop_reason=recomputed")
+            sys.exit(2)
+    if pre_reason != post_reason:
+        print(f"[FAIL] {fail_msg}: finish_reason changed "
+              f"{pre_reason} -> {post_reason}")
+        sys.exit(2)
     print(f"[PASS] {pass_msg}")
 else:
     print("[WARN] REQUIRE_OUTPUT_MATCH=0, text difference is not treated as failure")
@@ -266,6 +422,7 @@ trigger_decode_remote() {
     ssh "${SSH_DECODE}" \
         "cd '${DECODE_TEST_DIR}' && \
          LOCAL_IP='${DECODE_HOST}' NIC='${NIC}' \
+         PYTHON_BIN='${PYTHON_BIN}' NUM_NPUS='${NUM_NPUS:-16}' \
          DECODE_FAULT_NPU='${DECODE_FAULT_NPU}' \
          DECODE_DP_SIZE='${DECODE_DP_SIZE}' \
          DECODE_ITS_PORT_START='${DECODE_ITS_PORT_START}' \
@@ -286,6 +443,8 @@ trigger_decode_local() {
     esac
     log "triggering decode ${action} locally ..."
     LOCAL_IP="${DECODE_HOST}" \
+        PYTHON_BIN="${PYTHON_BIN}" \
+        NUM_NPUS="${NUM_NPUS:-16}" \
         DECODE_FAULT_NPU="${DECODE_FAULT_NPU}" \
         DECODE_DP_SIZE="${DECODE_DP_SIZE}" \
         DECODE_ITS_PORT_START="${DECODE_ITS_PORT_START}" \

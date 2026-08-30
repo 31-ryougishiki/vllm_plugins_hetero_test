@@ -32,6 +32,14 @@ export FAULT_NODE_IP="${PREFILL_HOST}"
 export DECODE_HOST
 export DECODE_FAULT_NPU
 export RECOVER_TARGET="${RECOVER_TARGET:-both}"
+if [[ "${RECOVER_TARGET}" != "both" ]]; then
+    echo "[scenario3-dc][ERROR] TRIGGER_MODE=dc requires RECOVER_TARGET=both:" >&2
+    echo "  DecisionMakingCenter only issues RECOVER when ALL bad cards of the" >&2
+    echo "  service are reported in ONE /repair/devices request, so single-side" >&2
+    echo "  recovery cannot be expressed in dc mode. Use run_scenario3.sh with" >&2
+    echo "  TRIGGER_MODE=ssh/local for RECOVER_TARGET=${RECOVER_TARGET}." >&2
+    exit 1
+fi
 export START_PREFILL="${START_PREFILL:-0}"
 export START_PROXY="${START_PROXY:-0}"
 

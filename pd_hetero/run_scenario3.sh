@@ -54,6 +54,7 @@ DECODE_ITS_PORT_START="${DECODE_ITS_PORT_START:-18001}"
 DECODE_LOG_DIR="${DECODE_LOG_DIR:-${WORK_ROOT}/logs/decode}"
 DECODE_TEST_DIR="${DECODE_TEST_DIR:-${WORK_ROOT}/vllm_plugins_hetero_test/pd_hetero}"
 DECODE_FAULT_NPU="${DECODE_FAULT_NPU:-15}"
+DECODE_DEVICE_START="${DECODE_DEVICE_START:-0}"
 
 # 代理。
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -104,6 +105,20 @@ case "${RECOVER_TARGET}" in
         ;;
 esac
 
+# 决策中心只有在**一次** repair/devices 请求里看到服务下全部坏卡都已上报
+# 时才会下发 RECOVER。单侧恢复（prefill/decode）无法在 DC 模式下表达：
+# 只上报一侧坏卡，DC 会发现服务仍有坏卡而不恢复；上报两侧又等于 both。
+# 与其静默不恢复（复测还会误对比），不如直接失败并给出可执行提示。
+if [[ "${TRIGGER_MODE}" == "dc" && "${RECOVER_TARGET}" != "both" ]]; then
+    echo "[scenario3][ERROR] TRIGGER_MODE=dc requires RECOVER_TARGET=both:" >&2
+    echo "  DecisionMakingCenter only issues RECOVER when ALL bad cards of the" >&2
+    echo "  service are reported in ONE /repair/devices request, so a single-side" >&2
+    echo "  recovery cannot be expressed in dc mode." >&2
+    echo "  Use TRIGGER_MODE=ssh (or local) for RECOVER_TARGET=${RECOVER_TARGET}," >&2
+    echo "  or set RECOVER_TARGET=both." >&2
+    exit 1
+fi
+
 # decision_center 模式且恢复 both 时，必须在**一次** repair/devices 里把
 # 服务下所有坏卡都报给决策中心；否则第一次 repair 后决策中心发现服务仍
 # 有坏卡，不会下发 RECOVER。
@@ -141,19 +156,50 @@ echo "[scenario3] baseline    : ${PRE_OUTPUT}"
 echo "[scenario3] output dir  : ${SCENARIO_LOG_DIR}"
 echo "============================================================"
 
+# D 端当前处于空转状态的 executor rank 集合（默认只含场景 2 的故障 rank；
+# dc 模式下场景 2 可能额外缩零其它 decoder，这里通过 ITS /status 动态发现）。
+DECODE_BAD_RANKS=("${DECODE_FAULT_NPU}")
+
+decode_rank_is_bad() {
+    local rank="$1"
+    local bad
+    for bad in "${DECODE_BAD_RANKS[@]}"; do
+        if [[ "${bad}" == "${rank}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [[ "${TRIGGER_MODE}" == "dc" ]]; then
+    echo "[scenario3] discovering scaled-to-zero decode executors via ITS /status ..."
+    for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
+        if [[ "${dp_rank}" == "${DECODE_FAULT_NPU}" ]]; then
+            continue
+        fi
+        ws="$(its_status_field "${DECODE_HOST}" \
+            "$((DECODE_ITS_PORT_START + dp_rank))" world_size)"
+        if [[ -n "${ws}" && "${ws}" == "0" ]]; then
+            DECODE_BAD_RANKS+=("${dp_rank}")
+            echo "[scenario3] decode dp${dp_rank} is scaled to zero (world_size=0)"
+        fi
+    done
+    echo "[scenario3] decode bad ranks: ${DECODE_BAD_RANKS[*]}"
+fi
+
 # ------------------------------------------------------------------
 # 1. 前置状态校验：P 4 个 engine 在线（异构或对称均可），
-#    D 15 个健康 + 故障 executor 空转，代理在线。
+#    D 存活 executor 健康 + 空转 executor 保持 ITS 在线，代理在线。
 # ------------------------------------------------------------------
 for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
     wait_http "prefill dp${dp_rank} (pre-recover)" "127.0.0.1" \
         "$((VLLM_PORT_START + dp_rank))" /health 300 || exit 1
 done
 for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
-    if (( dp_rank == DECODE_FAULT_NPU )); then
-        # 场景 2 的结束状态：故障 executor 处于 Idle mode，其 /health 可能
-        # 仍由空转 EngineCore 返回 200，也可能已经不可用，这里不做强校验；
-        # DO_DECODE=1 时由远程 trigger_decode_recover.sh 确认 idle 日志。
+    if decode_rank_is_bad "${dp_rank}"; then
+        # 场景 2 的结束状态：故障/额外缩零 executor 的 /health 可能仍由空转
+        # EngineCore 返回 200，也可能不可用；DO_DECODE=1 时由 ITS /status
+        # 与远程 trigger_decode_recover.sh 确认恢复。
         continue
     fi
     wait_http "decode dp${dp_rank} (pre-recover)" "${DECODE_HOST}" \
@@ -161,6 +207,25 @@ for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
 done
 wait_http "proxy" "${PROXY_HOST}" "${PROXY_PORT}" /healthcheck 120 || exit 1
 echo "[scenario3] preconditions ok: P online, D current DP=${NEW_DECODE_DP}TP1, proxy online"
+
+# 触发前快照 P 日志 marker 计数。重复执行场景 3 时 P 已是对称拓扑，
+# executor 幂等短路日志（skipping redundant worker restart）可能在下发后
+# 立刻写出；wait 调用时再取基线会漏掉该行并误超时。
+P_BARRIER_BASELINE=()
+P_KV_BASELINE=()
+for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
+    P_BARRIER_BASELINE[${dp_rank}]="$(log_marker_count \
+        "${PREFILL_LOG_DIR}/dp${dp_rank}.log" \
+        "Full-restart barrier passed" \
+        "skipping redundant worker restart")"
+    P_KV_BASELINE[${dp_rank}]="$(log_marker_count \
+        "${PREFILL_LOG_DIR}/dp${dp_rank}.log" \
+        "KV connector metadata updated successfully" \
+        "skipping redundant worker restart")"
+    echo "[scenario3] pre-trigger marker baseline dp${dp_rank}: " \
+        "barrier=${P_BARRIER_BASELINE[${dp_rank}]} " \
+        "kv=${P_KV_BASELINE[${dp_rank}]}"
+done
 
 # ------------------------------------------------------------------
 # 2. P RECOVER：异构 DP4TP(3,4,4,4) -> 对称 DP4TP4。
@@ -174,16 +239,17 @@ if [[ "${DO_PREFILL}" == "1" ]]; then
 
     echo "[scenario3] triggering prefill RECOVER DP4TP(3,4,4,4) -> DP4TP4 ..."
     if [[ "${TRIGGER_MODE}" == "dc" ]]; then
-        # dc + both 时把 P/D 坏卡合并到同一次 repair/devices 请求。
+        # dc + both 时把 P/D 全部坏卡合并到同一次 repair/devices 请求。
         REPAIR_ARGS=("${FAULT_NODE_IP}:${FAULT_NPU}")
         if [[ "${DO_DECODE}" == "1" ]]; then
-            REPAIR_ARGS+=("${DECODE_HOST}:${DECODE_FAULT_NPU}")
+            for bad_rank in "${DECODE_BAD_RANKS[@]}"; do
+                REPAIR_ARGS+=("${DECODE_HOST}:$((DECODE_DEVICE_START + bad_rank))")
+            done
         fi
         if dc_repair_devices "${REPAIR_ARGS[@]}" \
                 | tee "${SCENARIO_LOG_DIR}/trigger_prefill_recover.log"; then
             DC_REPAIR_SENT=1
-            echo "[scenario3] decision center accepted repair: ${FAULT_NODE_IP}/${FAULT_NPU}" \
-                "$( [[ ${DO_DECODE} -eq 1 ]] && echo + ${DECODE_HOST}/${DECODE_FAULT_NPU} || true )"
+            echo "[scenario3] decision center accepted repair: ${REPAIR_ARGS[*]}"
         else
             echo "[scenario3][ERROR] decision center repair/devices failed" >&2
             exit 1
@@ -208,16 +274,20 @@ if [[ "${DO_PREFILL}" == "1" ]]; then
             "$((VLLM_PORT_START + dp_rank))" /health "${RESTART_TIMEOUT}" || exit 1
         wait_log_marker "dp${dp_rank} full-restart barrier" \
             "${PREFILL_LOG_DIR}/dp${dp_rank}.log" \
-            "Full-restart barrier passed" "${RESTART_TIMEOUT}" || exit 1
+            "Full-restart barrier passed" "${RESTART_TIMEOUT}" \
+            "${P_BARRIER_BASELINE[${dp_rank}]}" \
+            "skipping redundant worker restart" || exit 1
         wait_log_marker "dp${dp_rank} KV connector metadata" \
             "${PREFILL_LOG_DIR}/dp${dp_rank}.log" \
-            "KV connector metadata updated successfully" "${RESTART_TIMEOUT}" || exit 1
+            "KV connector metadata updated successfully" "${RESTART_TIMEOUT}" \
+            "${P_KV_BASELINE[${dp_rank}]}" \
+            "skipping redundant worker restart" || exit 1
     done
     echo "[scenario3] prefill recovered to symmetric DP${DP_SIZE}TP${TP_SIZE}"
 
-    # P 恢复后 D 的 15 个 decoder 必须仍健康（Mooncake 已按新 engine_id 恢复）。
+    # P 恢复后 D 的存活 decoder 必须仍健康（Mooncake 已按新 engine_id 恢复）。
     for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
-        if (( dp_rank == DECODE_FAULT_NPU )); then
+        if decode_rank_is_bad "${dp_rank}"; then
             continue
         fi
         wait_http "decode dp${dp_rank} (after P recover)" "${DECODE_HOST}" \
@@ -268,10 +338,21 @@ if [[ "${DO_DECODE}" == "1" ]]; then
             "$((DECODE_VLLM_PORT_START + dp_rank))" /health "${RESTART_TIMEOUT}" || exit 1
     done
 
-    RECOVERED_DECODE_PORT=$((DECODE_VLLM_PORT_START + DECODE_FAULT_NPU))
-    echo "[scenario3] adding recovered decoder ${DECODE_HOST}:${RECOVERED_DECODE_PORT} back to proxy ..."
-    add_proxy_instance "${DECODE_HOST}" "${RECOVERED_DECODE_PORT}" \
-        | tee -a "${SCENARIO_LOG_DIR}/proxy_add.log"
+    # 只把 DECODE_FAULT_NPU 加回是不够的：dc 模式的场景 2 可能额外摘除了
+    # 其它 decoder。恢复完成后应把全部 decoder 都重新登记到代理；代理侧
+    # add 对已存在的实例是幂等的，proxy_instance.py 会校验实例确实出现在
+    # current_decode_instances 里。
+    echo "[scenario3] re-adding all ${DECODE_DP_SIZE} decoders to proxy ..."
+    for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
+        decoder_port=$((DECODE_VLLM_PORT_START + dp_rank))
+        if ! add_proxy_instance "${DECODE_HOST}" "${decoder_port}" \
+                | tee -a "${SCENARIO_LOG_DIR}/proxy_add.log"; then
+            echo "[scenario3][ERROR] failed to re-add decoder dp${dp_rank} " \
+                "${DECODE_HOST}:${decoder_port} to proxy" >&2
+            echo "  warmup would run against a stale decoder set; aborting" >&2
+            exit 1
+        fi
+    done
 
     # trigger_decode_recover.sh 已在 D 节点等待全部 16 个 executor 的
     # "Full-restart barrier passed" 与 /health 恢复，这里不再读远端日志。

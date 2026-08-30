@@ -6,8 +6,14 @@
 #
 # 校验内容：
 #   1. 16 个 decode engine 的 /health 仍为 200；
-#   2. decode 日志中不存在 "restarting workers of EVERY DP instance"；
+#   2. decode 日志中本次运行期间没有新增
+#      "restarting workers of EVERY DP instance"；
 #   3. 可选：通过 SSH 检查 decode 节点上 vllm 主进程的启动时间未变化。
+#
+# 与旧版本不同，第 2 项是【计数对比】而不是“目录里必须为 0”：D 端日志是
+# 追加写入的，重复执行场景（或 run_all_dc.sh 先跑过场景 2/3）会留下历史
+# marker。调用方在触发前记录 EXPECTED_RESTART_MARKERS，本脚本只校验触发后
+# 计数没有增长；未提供时默认要求为 0（旧行为）。
 #
 # 使用方式：
 #   # decode 与 prefill 在同一节点（测试环境）
@@ -18,7 +24,7 @@
 #
 # 环境变量：
 #   DECODE_HOST / DECODE_VLLM_PORT_START / DECODE_DP_SIZE /
-#   DECODE_LOG_DIR / SSH_DECODE
+#   DECODE_LOG_DIR / SSH_DECODE / EXPECTED_RESTART_MARKERS
 
 set -uo pipefail
 
@@ -28,6 +34,10 @@ DECODE_DP_SIZE="${DECODE_DP_SIZE:-16}"
 DECODE_LOG_DIR="${DECODE_LOG_DIR:-/opt/its/z30055003/logs/decode}"
 SSH_DECODE="${SSH_DECODE:-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+# 触发前记录的解码侧 restart marker 总数；未提供时按旧语义要求为 0。
+EXPECTED_RESTART_MARKERS="${EXPECTED_RESTART_MARKERS:-0}"
+EXPECTED_RESTART_MARKERS="${EXPECTED_RESTART_MARKERS//[^0-9]/}"
+[[ -n "${EXPECTED_RESTART_MARKERS}" ]] || EXPECTED_RESTART_MARKERS=0
 
 FAIL=0
 
@@ -63,28 +73,52 @@ echo "[check-decode] healthy=${HEALTHY}/${DECODE_DP_SIZE}"
 check_restart_marker() {
     local label="$1"
     local grep_cmd="$2"
+    local output
+    local status
     local count
-    echo "[check-decode] ${label}: searching restart markers"
-    count="$(eval "${grep_cmd}" | wc -l)"
-    if [[ "${count}" -gt 0 ]]; then
-        echo "[check-decode][FAIL] ${label}: found ${count} restart marker(s) on decode side" >&2
+    echo "[check-decode] ${label}: counting restart markers"
+    # Capture the command's exit status separately from the line count.  A
+    # failed ssh / missing remote log dir must be treated as "could not
+    # verify", not as "0 markers found".
+    output="$(eval "${grep_cmd}" 2>&1)"
+    status=$?
+    if [[ ${status} -ne 0 ]]; then
+        echo "[check-decode][FAIL] ${label}: unable to inspect decode logs " \
+            "(command exited ${status}): ${output}" >&2
+        FAIL=1
+        return
+    fi
+    if [[ -z "${output}" ]]; then
+        count=0
+    else
+        count="$(printf '%s\n' "${output}" | wc -l)"
+    fi
+    count="${count//[^0-9]/}"
+    [[ -n "${count}" ]] || count=0
+    if [[ "${count}" -ne "${EXPECTED_RESTART_MARKERS}" ]]; then
+        echo "[check-decode][FAIL] ${label}: restart markers changed " \
+            "${EXPECTED_RESTART_MARKERS} -> ${count} (decode side was restarted)" >&2
         FAIL=1
     else
-        echo "[check-decode] ${label}: no restart markers"
+        echo "[check-decode] ${label}: restart markers unchanged (${count})"
     fi
 }
 
 if [[ -n "${SSH_DECODE}" ]]; then
     check_restart_marker "remote logs" \
-        "ssh ${SSH_DECODE} \"grep -R 'restarting workers of EVERY DP instance' ${DECODE_LOG_DIR} 2>/dev/null || true\""
+        "ssh ${SSH_DECODE} \"[[ -d ${DECODE_LOG_DIR} ]] || exit 9; grep -R 'restarting workers of EVERY DP instance' ${DECODE_LOG_DIR} 2>/dev/null || true\""
     echo "[check-decode] remote vllm processes:"
     ssh "${SSH_DECODE}" "pgrep -af 'vllm.entrypoints.openai.api_server' || true"
 else
     if [[ -d "${DECODE_LOG_DIR}" ]]; then
         check_restart_marker "local logs" \
-            "grep -R 'restarting workers of EVERY DP instance' ${DECODE_LOG_DIR} 2>/dev/null || true"
+            "[[ -d ${DECODE_LOG_DIR} ]] || exit 9; grep -R 'restarting workers of EVERY DP instance' ${DECODE_LOG_DIR} 2>/dev/null || true"
     else
-        echo "[check-decode][WARN] ${DECODE_LOG_DIR} not accessible locally; set SSH_DECODE to inspect remote logs"
+        echo "[check-decode][FAIL] ${DECODE_LOG_DIR} not accessible locally;" >&2
+        echo "  cannot verify decode side was not restarted. Set SSH_DECODE" >&2
+        echo "  to inspect remote logs, or explicitly disable this check with" >&2
+        echo "  CHECK_DECODE_UNCHANGED=0." >&2
+        FAIL=1
     fi
 fi
 

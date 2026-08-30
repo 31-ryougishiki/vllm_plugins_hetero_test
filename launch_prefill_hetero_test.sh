@@ -181,7 +181,7 @@ done
 # 个别镜像又没有 curl。这里统一绕过代理，并避免依赖 curl 是否存在。
 check_health() {
     local port="$1"
-    python3 - "${port}" <<'PY'
+    "${PYTHON_BIN}" - "${port}" <<'PY'
 import sys
 import urllib.request
 

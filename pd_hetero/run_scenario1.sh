@@ -44,6 +44,8 @@ PREFILL_LOG_DIR="${PREFILL_LOG_DIR:-${WORK_ROOT}/logs/prefill}"
 DECODE_HOST="${DECODE_HOST:?export DECODE_HOST=<decode-node-ip>}"
 DECODE_DP_SIZE="${DECODE_DP_SIZE:-16}"
 DECODE_VLLM_PORT_START="${DECODE_VLLM_PORT_START:-9100}"
+DECODE_LOG_DIR="${DECODE_LOG_DIR:-${WORK_ROOT}/logs/decode}"
+SSH_DECODE="${SSH_DECODE:-}"
 
 # 代理（跑在 prefill 节点）。
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
@@ -104,7 +106,36 @@ echo "============================================================"
 # ------------------------------------------------------------------
 if [[ "${START_PREFILL}" == "1" ]]; then
     if all_http_ready "127.0.0.1" "${VLLM_PORT_START}" "${DP_SIZE}"; then
-        echo "[scenario1] prefill engines already healthy, skip launch"
+        if [[ "${TRIGGER_MODE}" == "dc" && "${ASSUME_DC_REGISTERED:-0}" != "1" ]]; then
+            # dc 模式只看 /health 不够：健康不代表 executor 已用统一
+            # VLLM_SERVICE_ID / VLLM_ITS_DECISION_CENTER_URL 向决策中心注册。
+            # 普通 launch 脚本拉起的进程会在后续 trigger_fault 时被 DC
+            # 静默过滤。先检查运行中进程的启动环境，读不到时 fail-closed。
+            if dc_registration_env_ok "${DECISION_CENTER_URL}" \
+                    "${VLLM_SERVICE_ID:-pd-hetero-service}" "${DP_SIZE}"; then
+                echo "[scenario1] prefill engines healthy and dc launch env matches; skip launch"
+            else
+                echo "[scenario1][ERROR] prefill engines are already healthy but " >&2
+                echo "  their launch env does not prove dc registration." >&2
+                echo "  Restart them with decision_center/launch_prefill_dc.sh, or set" >&2
+                echo "  ASSUME_DC_REGISTERED=1 only if they were already registered" >&2
+                echo "  with the decision center." >&2
+                exit 1
+            fi
+        else
+            echo "[scenario1] prefill engines already healthy, skip launch"
+        fi
+    elif [[ "${TRIGGER_MODE}" == "dc" ]]; then
+        # dc 模式必须用决策中心 launch 脚本拉起：它导出统一的
+        # VLLM_SERVICE_ID 与 VLLM_ITS_DECISION_CENTER_URL，executor 才会
+        # 向决策中心注册；否则 trigger_fault 会被 DC 静默过滤。
+        echo "[scenario1] launching symmetric prefill with decision-center registration ..."
+        nohup env LOG_DIR="${PREFILL_LOG_DIR}" \
+            PREFILL_HOST="${LOCAL_IP}" \
+            DECISION_CENTER_URL="${DECISION_CENTER_URL}" \
+            VLLM_SERVICE_ID="${VLLM_SERVICE_ID:-pd-hetero-service}" \
+            bash "${ROOT_SCRIPT_DIR}/decision_center/launch_prefill_dc.sh" \
+            > "${SCENARIO_LOG_DIR}/launch_prefill_dc.log" 2>&1 &
     else
         echo "[scenario1] launching symmetric prefill DP${DP_SIZE}TP${TP_SIZE} ..."
         nohup env LOG_DIR="${PREFILL_LOG_DIR}" \
@@ -147,6 +178,22 @@ wait_http "proxy" "${PROXY_HOST}" "${PROXY_PORT}" /healthcheck 120 || exit 1
 run_warmup "baseline" || exit 1
 send_request "baseline" "${PRE_OUTPUT}" || exit 1
 
+# 记录 D 端重启 marker 基线：check_decode_unchanged.sh 按“计数不增长”
+# 校验 D 未被重启。D 日志是追加的，重复执行场景时目录里已有历史 marker，
+# 不能要求为 0。
+DECODE_MARKER_BASELINE=0
+if [[ -n "${SSH_DECODE}" ]]; then
+    DECODE_MARKER_BASELINE="$(ssh "${SSH_DECODE}" \
+        "grep -R 'restarting workers of EVERY DP instance' ${DECODE_LOG_DIR} 2>/dev/null | wc -l" \
+        2>/dev/null || echo 0)"
+else
+    DECODE_MARKER_BASELINE="$(grep -R 'restarting workers of EVERY DP instance' \
+        "${DECODE_LOG_DIR}" 2>/dev/null | wc -l || echo 0)"
+fi
+DECODE_MARKER_BASELINE="${DECODE_MARKER_BASELINE//[^0-9]/}"
+[[ -n "${DECODE_MARKER_BASELINE}" ]] || DECODE_MARKER_BASELINE=0
+echo "[scenario1] decode restart-marker baseline=${DECODE_MARKER_BASELINE}"
+
 # ------------------------------------------------------------------
 # 5. 只对 P 端下发异构重启策略。
 # ------------------------------------------------------------------
@@ -157,6 +204,25 @@ for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
     its_port=$((ITS_HTTP_PORT_START + dp_rank * TP_SIZE))
     wait_http "prefill ITS dp${dp_rank}" "127.0.0.1" "${its_port}" \
         /health 120 || exit 1
+done
+
+# 在触发前快照 P 日志 marker 计数。幂等重复执行时 executor 只打印
+# "skipping redundant worker restart"，而且该行可能在下发后立刻写出；
+# 若在 wait 调用时才取基线，策略执行快于计数就会误超时。
+P_BARRIER_BASELINE=()
+P_KV_BASELINE=()
+for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
+    P_BARRIER_BASELINE[${dp_rank}]="$(log_marker_count \
+        "${PREFILL_LOG_DIR}/dp${dp_rank}.log" \
+        "Full-restart barrier passed" \
+        "skipping redundant worker restart")"
+    P_KV_BASELINE[${dp_rank}]="$(log_marker_count \
+        "${PREFILL_LOG_DIR}/dp${dp_rank}.log" \
+        "KV connector metadata updated successfully" \
+        "skipping redundant worker restart")"
+    echo "[scenario1] pre-trigger marker baseline dp${dp_rank}: " \
+        "barrier=${P_BARRIER_BASELINE[${dp_rank}]} " \
+        "kv=${P_KV_BASELINE[${dp_rank}]}"
 done
 
 echo "[scenario1] triggering prefill DP4TP4 -> DP4TP(3,4,4,4) ..."
@@ -201,10 +267,14 @@ for ((dp_rank = 0; dp_rank < DP_SIZE; dp_rank++)); do
         "$((VLLM_PORT_START + dp_rank))" /health "${RESTART_TIMEOUT}" || exit 1
     wait_log_marker "dp${dp_rank} full-restart barrier" \
         "${PREFILL_LOG_DIR}/dp${dp_rank}.log" \
-        "Full-restart barrier passed" "${RESTART_TIMEOUT}" || exit 1
+        "Full-restart barrier passed" "${RESTART_TIMEOUT}" \
+        "${P_BARRIER_BASELINE[${dp_rank}]}" \
+        "skipping redundant worker restart" || exit 1
     wait_log_marker "dp${dp_rank} KV connector metadata" \
         "${PREFILL_LOG_DIR}/dp${dp_rank}.log" \
-        "KV connector metadata updated successfully" "${RESTART_TIMEOUT}" || exit 1
+        "KV connector metadata updated successfully" "${RESTART_TIMEOUT}" \
+        "${P_KV_BASELINE[${dp_rank}]}" \
+        "skipping redundant worker restart" || exit 1
 done
 
 # 确认 D 端仍在服务（未被下发任何策略）。
@@ -222,10 +292,26 @@ send_request "post_restart" "${POST_OUTPUT}" || exit 1
 
 # D 端日志级“未重启”校验（可选，SSH_DECODE 可用时会检查远端日志）。
 if [[ "${CHECK_DECODE_UNCHANGED:-1}" == "1" ]]; then
+    if [[ -z "${SSH_DECODE}" && ! -d "${DECODE_LOG_DIR}" ]]; then
+        if [[ -n "${CHECK_DECODE_UNCHANGED+x}" ]]; then
+            echo "[scenario1][ERROR] CHECK_DECODE_UNCHANGED=1 but " >&2
+            echo "  SSH_DECODE is empty and ${DECODE_LOG_DIR} is not accessible" >&2
+            echo "  locally. Set SSH_DECODE=root@<decode-ip> to inspect remote logs." >&2
+            exit 1
+        fi
+        echo "[scenario1][WARN] decode logs are remote and SSH_DECODE is empty;" \
+            "skipping log-level unchanged check (16 /health checks already passed)"
+        CHECK_DECODE_UNCHANGED=0
+    fi
+fi
+if [[ "${CHECK_DECODE_UNCHANGED:-1}" == "1" ]]; then
     echo "[scenario1] checking decode side was not restarted ..."
     DECODE_HOST="${DECODE_HOST}" \
     DECODE_VLLM_PORT_START="${DECODE_VLLM_PORT_START}" \
     DECODE_DP_SIZE="${DECODE_DP_SIZE}" \
+    DECODE_LOG_DIR="${DECODE_LOG_DIR}" \
+    SSH_DECODE="${SSH_DECODE}" \
+    EXPECTED_RESTART_MARKERS="${DECODE_MARKER_BASELINE}" \
         bash "${SCRIPT_DIR}/check_decode_unchanged.sh" || exit 1
 fi
 

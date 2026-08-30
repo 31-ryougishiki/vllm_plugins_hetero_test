@@ -106,8 +106,15 @@ echo "============================================================"
 # P 端“已重启”日志计数：后面用于证明 P 保持未变。
 prefill_restart_marker_count() {
     local dp_rank="$1"
-    grep -c "restarting workers of EVERY DP instance" \
-        "${PREFILL_LOG_DIR}/dp${dp_rank}.log" 2>/dev/null || echo 0
+    local count
+    count="$(grep -c "restarting workers of EVERY DP instance" \
+        "${PREFILL_LOG_DIR}/dp${dp_rank}.log" 2>/dev/null || true)"
+    # grep -c 无匹配时输出 0 且退出码为 1，不能用 ``|| echo 0`` 兜底，
+    # 否则会拼出 "0\n0" 两行，后续 [[ ... -ne ... ]] 算术比较失效，
+    # P 真的重启了也检测不到。
+    count="${count//[^0-9]/}"
+    [[ -n "${count}" ]] || count=0
+    echo "${count}"
 }
 
 # ------------------------------------------------------------------
@@ -115,7 +122,32 @@ prefill_restart_marker_count() {
 # ------------------------------------------------------------------
 if [[ "${START_PREFILL}" == "1" ]]; then
     if all_http_ready "127.0.0.1" "${VLLM_PORT_START}" "${DP_SIZE}"; then
-        echo "[scenario2] prefill engines already healthy, skip launch"
+        if [[ "${TRIGGER_MODE}" == "dc" && "${ASSUME_DC_REGISTERED:-0}" != "1" ]]; then
+            if dc_registration_env_ok "${DECISION_CENTER_URL}" \
+                    "${VLLM_SERVICE_ID:-pd-hetero-service}" "${DP_SIZE}"; then
+                echo "[scenario2] prefill engines healthy and dc launch env matches; skip launch"
+            else
+                echo "[scenario2][ERROR] prefill engines are already healthy but " >&2
+                echo "  their launch env does not prove dc registration." >&2
+                echo "  Restart them with decision_center/launch_prefill_dc.sh, or set" >&2
+                echo "  ASSUME_DC_REGISTERED=1 only if they were already registered" >&2
+                echo "  with the decision center." >&2
+                exit 1
+            fi
+        else
+            echo "[scenario2] prefill engines already healthy, skip launch"
+        fi
+    elif [[ "${TRIGGER_MODE}" == "dc" ]]; then
+        # dc 模式必须用决策中心 launch 脚本拉起：它导出统一的
+        # VLLM_SERVICE_ID 与 VLLM_ITS_DECISION_CENTER_URL，executor 才会
+        # 向决策中心注册；否则 trigger_fault 会被 DC 静默过滤。
+        echo "[scenario2] launching symmetric prefill with decision-center registration ..."
+        nohup env LOG_DIR="${PREFILL_LOG_DIR}" \
+            PREFILL_HOST="${LOCAL_IP}" \
+            DECISION_CENTER_URL="${DECISION_CENTER_URL}" \
+            VLLM_SERVICE_ID="${VLLM_SERVICE_ID:-pd-hetero-service}" \
+            bash "${ROOT_SCRIPT_DIR}/decision_center/launch_prefill_dc.sh" \
+            > "${SCENARIO_LOG_DIR}/launch_prefill_dc.log" 2>&1 &
     else
         echo "[scenario2] launching symmetric prefill DP${DP_SIZE}TP${TP_SIZE} ..."
         nohup env LOG_DIR="${PREFILL_LOG_DIR}" \
@@ -209,20 +241,72 @@ if [[ "${TRIGGER_MODE}" != "ssh" && "${TRIGGER_MODE}" != "local" ]]; then
 fi
 
 # 决策中心可能因专家数整除等约束选择不等于 DP15 的合法拓扑。dc 模式
-# 下以实际 /health 存活数为准，并把所有不可用的 decoder 都从代理摘除。
+# 下以 ITS /status 的 world_size 为准：空转 executor 的 vLLM /health 仍会
+# 返回 200，不能把“故障卡 /health 失败”当作降级完成的信号。先等故障
+# executor 的 world_size 变成 0，再等全部 executor 的 world_size 快照连续
+# 两次一致（DC 可能同时多关若干 decoder）。
 if [[ "${TRIGGER_MODE}" == "dc" ]]; then
+    echo "[scenario2] waiting for decision-center degrade to be applied ..."
+    FAULT_ITS_PORT=$((DECODE_ITS_PORT_START + DECODE_FAULT_NPU))
+    FAULT_ZERO=0
+    for _attempt in $(seq 1 $((RESTART_TIMEOUT / 2))); do
+        fault_ws="$(its_status_field "${DECODE_HOST}" \
+            "${FAULT_ITS_PORT}" world_size)"
+        if [[ -n "${fault_ws}" && "${fault_ws}" == "0" ]]; then
+            FAULT_ZERO=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ "${FAULT_ZERO}" -ne 1 ]]; then
+        echo "[scenario2][ERROR] fault executor ${DECODE_HOST}:${FAULT_ITS_PORT} " \
+            "did not reach world_size=0 within ${RESTART_TIMEOUT}s" >&2
+        exit 1
+    fi
+
+    echo "[scenario2] fault executor is scaled to zero; waiting for decode world_size set to stabilize ..."
+    PREV_STATES=""
+    STABLE=0
+    for _attempt in $(seq 1 $((RESTART_TIMEOUT / 2))); do
+        CURRENT_STATES=""
+        for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
+            ws="$(its_status_field "${DECODE_HOST}" \
+                "$((DECODE_ITS_PORT_START + dp_rank))" world_size)"
+            if [[ -z "${ws}" ]]; then
+                CURRENT_STATES+="?"
+            elif [[ "${ws}" == "0" ]]; then
+                CURRENT_STATES+="0"
+            else
+                CURRENT_STATES+="1"
+            fi
+        done
+        if [[ -n "${PREV_STATES}" && "${CURRENT_STATES}" == "${PREV_STATES}" ]]; then
+            STABLE=1
+            break
+        fi
+        PREV_STATES="${CURRENT_STATES}"
+        sleep 2
+    done
+    if [[ "${STABLE}" -ne 1 ]]; then
+        echo "[scenario2][ERROR] decode world_size set did not stabilize within " \
+            "${RESTART_TIMEOUT}s (last states=${PREV_STATES})" >&2
+        exit 1
+    fi
+
     echo "[scenario2] discovering active decode engines after decision-center degrade ..."
     ACTIVE_DECODE_COUNT=0
     for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
-        if check_http "${DECODE_HOST}" "$((DECODE_VLLM_PORT_START + dp_rank))" /health; then
+        ws="$(its_status_field "${DECODE_HOST}" \
+            "$((DECODE_ITS_PORT_START + dp_rank))" world_size)"
+        if [[ -n "${ws}" && "${ws}" != "0" ]]; then
             ACTIVE_DECODE_COUNT=$((ACTIVE_DECODE_COUNT + 1))
-            echo "[scenario2] decode dp${dp_rank}: healthy"
+            echo "[scenario2] decode dp${dp_rank}: world_size=${ws} (active)"
         else
-            echo "[scenario2] decode dp${dp_rank}: unavailable after degrade"
+            echo "[scenario2] decode dp${dp_rank}: world_size=${ws:-unavailable} (idle/down)"
         fi
     done
     if (( ACTIVE_DECODE_COUNT <= 0 )); then
-        echo "[scenario2][ERROR] no decode engine survived decision-center degrade" >&2
+        echo "[scenario2][ERROR] no decode executor remained active after decision-center degrade" >&2
         exit 1
     fi
     echo "[scenario2] decision-center degraded decode: ${ACTIVE_DECODE_COUNT}/${DECODE_DP_SIZE} active"
@@ -254,21 +338,30 @@ echo "[scenario2] decode remaining engines: ${ACTIVE_DECODE_COUNT}/${DECODE_DP_S
 # ------------------------------------------------------------------
 FAULT_DECODE_PORT=$((DECODE_VLLM_PORT_START + DECODE_FAULT_NPU))
 echo "[scenario2] removing fault decoder ${DECODE_HOST}:${FAULT_DECODE_PORT} from proxy ..."
-remove_proxy_instance "${DECODE_HOST}" "${FAULT_DECODE_PORT}" \
-    | tee -a "${SCENARIO_LOG_DIR}/proxy_remove.log"
+if ! remove_proxy_instance "${DECODE_HOST}" "${FAULT_DECODE_PORT}" \
+        | tee -a "${SCENARIO_LOG_DIR}/proxy_remove.log"; then
+    echo "[scenario2][ERROR] failed to remove fault decoder from proxy" >&2
+    echo "  the dead decoder would stay in rotation and pollute warmup/requests" >&2
+    exit 1
+fi
 
 if [[ "${TRIGGER_MODE}" == "dc" ]]; then
     # 决策中心可能额外关闭若干 decoder（例如为满足 expert_num 整除）。
-    # 所有 /health 不可用的 decoder 都要摘除，避免代理轮询到空转 engine。
+    # 所有 ITS world_size=0 的 executor 都要摘除，避免代理轮询到空转 engine。
     for ((dp_rank = 0; dp_rank < DECODE_DP_SIZE; dp_rank++)); do
         if (( dp_rank == DECODE_FAULT_NPU )); then
             continue
         fi
-        if ! check_http "${DECODE_HOST}" "$((DECODE_VLLM_PORT_START + dp_rank))" /health; then
-            echo "[scenario2] removing unavailable decoder dp${dp_rank} from proxy ..."
-            remove_proxy_instance "${DECODE_HOST}" \
-                "$((DECODE_VLLM_PORT_START + dp_rank))" \
-                | tee -a "${SCENARIO_LOG_DIR}/proxy_remove.log"
+        ws="$(its_status_field "${DECODE_HOST}" \
+            "$((DECODE_ITS_PORT_START + dp_rank))" world_size)"
+        if [[ -n "${ws}" && "${ws}" == "0" ]]; then
+            echo "[scenario2] removing idle decoder dp${dp_rank} from proxy ..."
+            if ! remove_proxy_instance "${DECODE_HOST}" \
+                    "$((DECODE_VLLM_PORT_START + dp_rank))" \
+                    | tee -a "${SCENARIO_LOG_DIR}/proxy_remove.log"; then
+                echo "[scenario2][ERROR] failed to remove idle decoder dp${dp_rank} from proxy" >&2
+                exit 1
+            fi
         fi
     done
 fi

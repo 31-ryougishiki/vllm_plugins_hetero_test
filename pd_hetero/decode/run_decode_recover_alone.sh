@@ -184,9 +184,11 @@ grep "RESULT_TEXT=" "${TEST_LOG_DIR}/post_request.log"
 # ------------------------------------------------------------------
 # 5. 与降级前基线对比。
 # ------------------------------------------------------------------
-if [[ ! -f "${PRE_OUTPUT}" ]]; then
-    echo "[decode-recover][WARN] baseline ${PRE_OUTPUT} not found, only checking non-empty output" >&2
-    REQUIRE_OUTPUT_MATCH=0
+if [[ "${REQUIRE_OUTPUT_MATCH}" == "1" && ! -f "${PRE_OUTPUT}" ]]; then
+    echo "[decode-recover][ERROR] baseline ${PRE_OUTPUT} not found;" >&2
+    echo "  refusing to report PASS for a text-match scenario without a baseline." >&2
+    echo "  Run run_decode_fault_alone.sh first or set RECOVER_BASELINE=/path." >&2
+    exit 2
 fi
 echo "[decode-recover] comparing recovered output with baseline ..."
 "${PYTHON_BIN}" - "${PRE_OUTPUT}" "${POST_OUTPUT}" "${REQUIRE_OUTPUT_MATCH}" <<'PY'
@@ -196,16 +198,24 @@ import sys
 pre_path, post_path, require_match = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 post = json.load(open(post_path, encoding="utf-8"))
 post_text = (post.get("choices") or [{}])[0].get("text") or ""
+post_reason = (post.get("choices") or [{}])[0].get("finish_reason")
+post_stop = (post.get("choices") or [{}])[0].get("stop_reason")
 
 if require_match and pre_path:
     pre = json.load(open(pre_path, encoding="utf-8"))
     pre_text = (pre.get("choices") or [{}])[0].get("text") or ""
+    pre_reason = (pre.get("choices") or [{}])[0].get("finish_reason")
+    pre_stop = (pre.get("choices") or [{}])[0].get("stop_reason")
     print(f"PRE_TEXT={pre_text!r}")
 else:
     pre_text = None
-    print("PRE_TEXT=<skipped: no baseline or match disabled>")
+    pre_reason = None
+    pre_stop = None
+    print("PRE_TEXT=<skipped: match disabled>")
 
 print(f"POST_TEXT={post_text!r}")
+print(f"PRE_FINISH={pre_reason} PRE_STOP={pre_stop} "
+      f"POST_FINISH={post_reason} POST_STOP={post_stop}")
 print(f"MATCH={pre_text == post_text if pre_text is not None else 'N/A'}")
 
 if not post_text:
@@ -215,6 +225,13 @@ if require_match and pre_text is not None and pre_text != post_text:
     print("[FAIL] decode recover output differs from pre-degrade baseline")
     sys.exit(2)
 if require_match:
+    for label, stop in (("PRE", pre_stop), ("POST", post_stop)):
+        if stop == "recomputed":
+            print(f"[FAIL] {label} stop_reason=recomputed")
+            sys.exit(2)
+    if pre_reason != post_reason:
+        print(f"[FAIL] finish_reason changed {pre_reason} -> {post_reason}")
+        sys.exit(2)
     print("[PASS] decode DP15TP1 -> DP16TP1 output is identical to baseline")
 else:
     print("[WARN] REQUIRE_OUTPUT_MATCH=0")

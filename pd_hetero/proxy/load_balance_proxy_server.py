@@ -439,7 +439,12 @@ class NodeListener:
 
     @staticmethod
     async def check_instance_status(client: httpx.AsyncClient) -> bool:
-        endpoint = "/models"
+        # ServerState.url already ends with ``/v1``.  An absolute path is
+        # required here: a relative "models" reference could merge
+        # unpredictably with the base path, while the leading "/models" used
+        # before escaped the base path and probed the nonexistent root
+        # ``/models`` endpoint, so healthy instances were never added.
+        endpoint = "/v1/models"
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
         }
@@ -799,8 +804,19 @@ async def _handle_completions(api: str, request: Request):
                                 "max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(
                                 json.dumps(req_data).encode("utf-8"))
-                            instance_info = await _handle_select_instance(
+                            new_instance_info = await _handle_select_instance(
                                 api, req_data, tmp_request_length)
+                            # The decoder that returned "recomputed" has not
+                            # produced a final answer.  Release its load
+                            # reservation before switching to the retry
+                            # decoder; otherwise its active_tokens stays
+                            # positive forever, round-robin is disabled and
+                            # warmup can count the same decoder repeatedly.
+                            proxy_state.release_decoder(
+                                instance_info.decoder_idx,
+                                instance_info.decoder_score,
+                            )
+                            instance_info = new_instance_info
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
@@ -883,13 +899,15 @@ def trans_instances(instances: List[str]) -> List[ServerState]:
 @app.post("/v1/completions")
 @with_cancellation
 async def handle_completions(request: Request):
-    return await _handle_completions("/completions", request)
+    # ServerState clients are created with ``base_url=.../v1``; a leading
+    # slash escapes that base path in httpx, so pass the full API path here.
+    return await _handle_completions("/v1/completions", request)
 
 
 @app.post("/v1/chat/completions")
 @with_cancellation
 async def handle_chat_completions(request: Request):
-    return await _handle_completions("/chat/completions", request)
+    return await _handle_completions("/v1/chat/completions", request)
 
 
 @app.get("/healthcheck")

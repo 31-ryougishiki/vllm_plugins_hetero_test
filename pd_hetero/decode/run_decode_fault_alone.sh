@@ -252,8 +252,14 @@ pre = json.load(open(pre_path, encoding="utf-8"))
 post = json.load(open(post_path, encoding="utf-8"))
 pre_text = (pre.get("choices") or [{}])[0].get("text") or ""
 post_text = (post.get("choices") or [{}])[0].get("text") or ""
+pre_reason = (pre.get("choices") or [{}])[0].get("finish_reason")
+post_reason = (post.get("choices") or [{}])[0].get("finish_reason")
+pre_stop = (pre.get("choices") or [{}])[0].get("stop_reason")
+post_stop = (post.get("choices") or [{}])[0].get("stop_reason")
 print(f"PRE_TEXT={pre_text!r}")
 print(f"POST_TEXT={post_text!r}")
+print(f"PRE_FINISH={pre_reason} PRE_STOP={pre_stop} "
+      f"POST_FINISH={post_reason} POST_STOP={post_stop}")
 print(f"MATCH={pre_text == post_text}")
 
 if not post_text:
@@ -263,6 +269,13 @@ if require_match and pre_text != post_text:
     print("[FAIL] decode degrade output differs from baseline")
     sys.exit(2)
 if require_match:
+    for label, stop in (("PRE", pre_stop), ("POST", post_stop)):
+        if stop == "recomputed":
+            print(f"[FAIL] {label} stop_reason=recomputed")
+            sys.exit(2)
+    if pre_reason != post_reason:
+        print(f"[FAIL] finish_reason changed {pre_reason} -> {post_reason}")
+        sys.exit(2)
     print("[PASS] decode DP16TP1 -> DP15TP1 output is identical to baseline")
 else:
     print("[WARN] REQUIRE_OUTPUT_MATCH=0")

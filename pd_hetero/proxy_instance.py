@@ -35,7 +35,41 @@ def main() -> int:
         with opener.open(req, timeout=30) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             print(body)
-            return 0 if resp.status == 200 else 1
+            if resp.status != 200:
+                return 1
+            # The proxy returns 200 even when an instance was only queued in
+            # ``waiting_nodes`` (its /v1/models probe failed) or when the
+            # instance list did not change.  Verify the reported instance
+            # list so orchestration scripts fail instead of silently testing
+            # with a stale decoder set.
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError:
+                print(
+                    f"[proxy-instance][ERROR] {action} response is not JSON",
+                    file=sys.stderr,
+                )
+                return 1
+            current = [
+                str(item)
+                for item in result.get("current_decode_instances", [])
+            ]
+            instance = f"{host}:{port}"
+            if action == "add" and instance not in current:
+                print(
+                    f"[proxy-instance][ERROR] add {instance} not reflected in "
+                    f"proxy decode instances: {current}",
+                    file=sys.stderr,
+                )
+                return 1
+            if action == "remove" and instance in current:
+                print(
+                    f"[proxy-instance][ERROR] remove {instance} still present "
+                    f"in proxy decode instances: {current}",
+                    file=sys.stderr,
+                )
+                return 1
+            return 0
     except (urllib.error.URLError, OSError) as exc:
         print(f"[proxy-instance][ERROR] {action} {host}:{port} failed: {exc}", file=sys.stderr)
         return 1

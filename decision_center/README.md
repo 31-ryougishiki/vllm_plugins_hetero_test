@@ -118,11 +118,16 @@ bash decision_center/repair_devices.sh 7.246.78.75:3 7.246.78.76:15
 `DP15TP1 -> DP16TP1` 的 RECOVER；脚本随后把恢复的 decoder 加回代理并
 对比输出。
 
-只恢复单侧：
+只恢复单侧时请使用手动/SSH 触发（`pd_hetero/run_scenario3.sh` 配合
+`TRIGGER_MODE=ssh/local`）：决策中心只有在**一次** repair 请求里看到
+服务下全部坏卡都已修复时才会下发 RECOVER，单侧 `RECOVER_TARGET=prefill`
+或 `decode` 无法用 dc 模式表达；`run_scenario3_dc.sh` 会直接拒绝该组合。
 
 ```bash
-RECOVER_TARGET=prefill bash decision_center/run_scenario3_dc.sh
-RECOVER_TARGET=decode  bash decision_center/run_scenario3_dc.sh
+RECOVER_TARGET=prefill SSH_DECODE=root@7.246.78.76 \
+    bash pd_hetero/run_scenario3.sh
+RECOVER_TARGET=decode TRIGGER_MODE=local \
+    bash pd_hetero/run_scenario3.sh
 ```
 
 ## 5. 全流程

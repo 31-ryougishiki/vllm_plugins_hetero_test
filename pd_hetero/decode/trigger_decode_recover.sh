@@ -34,13 +34,17 @@ DECODE_LOG_DIR="${DECODE_LOG_DIR:-/opt/its/z30055003/logs/decode}"
 DEPLOY_TYPE="${DEPLOY_TYPE:-RECOVER}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+# 同 trigger_decode_fault.sh：全部 16 个 executor 都收到 RECOVER 后才提交
+# generation；部分失败重跑时用新 generation 触发完整重建。
+# 文件名包含目标拓扑，避免换恢复卡/DP 后复用旧 generation。
+STRATEGY_GENERATION_FILE="${STRATEGY_GENERATION_FILE:-/tmp/vllm_plugins_decode_${DEPLOY_TYPE}_dp${DECODE_DP_SIZE}_tp${DECODE_TP_SIZE}_fault${DECODE_FAULT_NPU}_gen}"
 
 if [[ -z "${LOCAL_IP}" ]]; then
     echo "[trigger-decode-recover][ERROR] cannot detect local ip, please export LOCAL_IP" >&2
     exit 1
 fi
-if (( DECODE_FAULT_NPU < 0 || DECODE_FAULT_NPU >= NUM_NPUS )); then
-    echo "[trigger-decode-recover][ERROR] DECODE_FAULT_NPU=${DECODE_FAULT_NPU} must be in [0, ${NUM_NPUS})" >&2
+if (( DECODE_FAULT_NPU < 0 || DECODE_FAULT_NPU >= DECODE_DP_SIZE )); then
+    echo "[trigger-decode-recover][ERROR] DECODE_FAULT_NPU=${DECODE_FAULT_NPU} must be in [0, ${DECODE_DP_SIZE})" >&2
     exit 1
 fi
 
@@ -53,13 +57,34 @@ echo "[trigger-decode-recover] ITS ports      : ${DECODE_ITS_PORT_START}..$((DEC
 echo "[trigger-decode-recover] log dir        : ${DECODE_LOG_DIR}"
 echo "============================================================"
 
+# 在向 executor 下发策略前快照全部 16 个 rank 的日志计数。重复执行场景
+# 时日志是追加的，且幂等短路日志可能在下发后立刻写出；等待函数必须使用
+# 触发前的计数作为基线，而不是调用时刻的计数。
+declare -a BARRIER_BASELINE=()
+declare -a RESTART_BASELINE=()
+for ((rank = 0; rank < DECODE_DP_SIZE; rank++)); do
+    log_file="${DECODE_LOG_DIR}/dp${rank}.log"
+    restart_count="$(grep -c -e 'restarting workers of EVERY DP instance' \
+        -e 'skipping redundant worker restart' "${log_file}" 2>/dev/null || true)"
+    barrier_count="$(grep -c -e 'Full-restart barrier passed' \
+        -e 'skipping redundant worker restart' "${log_file}" 2>/dev/null || true)"
+    restart_count="${restart_count//[^0-9]/}"; [[ -n "${restart_count}" ]] || restart_count=0
+    barrier_count="${barrier_count//[^0-9]/}"; [[ -n "${barrier_count}" ]] || barrier_count=0
+    RESTART_BASELINE[${rank}]="${restart_count}"
+    BARRIER_BASELINE[${rank}]="${barrier_count}"
+    echo "[trigger-decode-recover] pre-trigger marker baseline dp${rank}: " \
+        "restart=${restart_count} barrier=${barrier_count}"
+done
+
 "${PYTHON_BIN}" - "${LOCAL_IP}" "${DECODE_FAULT_NPU}" "${DEPLOY_TYPE}" \
     "${DECODE_ITS_PORT_START}" "${DECODE_DP_SIZE}" "${DECODE_TP_SIZE}" \
-    "${NUM_NPUS}" <<'PY'
+    "${NUM_NPUS}" "${STRATEGY_GENERATION_FILE}" <<'PY'
 import json
+import socket
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 (
     local_ip,
@@ -69,7 +94,20 @@ import urllib.request
     dp_size_raw,
     tp_size_raw,
     num_npus_raw,
+    generation_file,
 ) = sys.argv[1:9]
+
+try:
+    generation = Path(generation_file).read_text(encoding="utf-8").strip()
+except FileNotFoundError:
+    generation = __import__("uuid").uuid4().hex
+
+_probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    _probe.bind((local_ip, 0))
+    barrier_master_port = _probe.getsockname()[1]
+finally:
+    _probe.close()
 
 recovered_npu = int(recovered_npu_raw)
 its_port_base = int(its_port_base)
@@ -126,6 +164,8 @@ for executor_id in range(dp_size):
         "executor_id": str(executor_id),
         "engine_parallel_config": engine_parallel_config,
         "engine_npu_healthy_state": npu_healthy_state,
+        "strategy_generation": generation,
+        "barrier_master_port": barrier_master_port,
     }
     data = json.dumps(payload).encode("utf-8")
     url = f"http://127.0.0.1:{its_port}/api/v1/executor/deploy"
@@ -135,8 +175,9 @@ for executor_id in range(dp_size):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with opener.open(req, timeout=60) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             print(
                 f"[trigger-decode-recover] executor_id={executor_id} "
@@ -153,6 +194,8 @@ if failed:
     print("[trigger-decode-recover] FAILED: at least one decode executor did not accept the strategy.")
     sys.exit(1)
 
+Path(generation_file).write_text(generation, encoding="utf-8")
+print(f"[trigger-decode-recover] strategy generation committed: {generation}")
 print("[trigger-decode-recover] all decode executors accepted the strategy.")
 PY
 RC=$?
@@ -163,22 +206,58 @@ fi
 wait_log_marker() {
     local log_file="$1"
     local marker="$2"
-    for _attempt in $(seq 1 $((RESTART_TIMEOUT / 2))); do
-        if grep -q "${marker}" "${log_file}" 2>/dev/null; then
-            echo "[trigger-decode-recover] found '${marker}' in ${log_file}"
+    local timeout="${3:-${RESTART_TIMEOUT}}"
+    shift 3
+    # 兼容旧式 [alt_marker...] 与新式 [baseline] [alt_marker...] 调用。
+    local baseline=""
+    local -a grep_args=("-c" "-e" "${marker}")
+    if [[ "$#" -ge 1 && ( -z "${1}" || "${1}" =~ ^[0-9]+$ ) ]]; then
+        baseline="${1}"
+        shift
+    fi
+    local alt
+    for alt in "$@"; do
+        [[ -n "${alt}" ]] && grep_args+=("-e" "${alt}")
+    done
+    local before
+    if [[ -n "${baseline}" ]]; then
+        before="${baseline}"
+    else
+        before="$(grep "${grep_args[@]}" "${log_file}" 2>/dev/null || true)"
+        before="${before//[^0-9]/}"
+        [[ -n "${before}" ]] || before=0
+    fi
+    for _attempt in $(seq 1 $((timeout / 2))); do
+        local now
+        now="$(grep "${grep_args[@]}" "${log_file}" 2>/dev/null || true)"
+        now="${now//[^0-9]/}"
+        [[ -n "${now}" ]] || now=0
+        if [[ "${now}" -gt "${before}" ]]; then
+            echo "[trigger-decode-recover] found new '${marker}' in ${log_file} (${before} -> ${now})"
             return 0
         fi
         sleep 2
     done
-    echo "[trigger-decode-recover][ERROR] timeout waiting for '${marker}' in ${log_file}" >&2
+    echo "[trigger-decode-recover][ERROR] timeout waiting for new '${marker}' in ${log_file} (baseline count=${before})" >&2
     return 1
 }
 
 echo "[trigger-decode-recover] waiting for full-restart barrier and restart markers ..."
+# marker 等待失败说明恢复波未完整执行；丢弃 generation，重跑会生成新值并
+# 强制所有 executor 重新参与完整 barrier/重启。
+fail_wait() {
+    rm -f "${STRATEGY_GENERATION_FILE}"
+    echo "[trigger-decode-recover][ERROR] marker wait failed; generation discarded" >&2
+    exit 1
+}
 for ((rank = 0; rank < DECODE_DP_SIZE; rank++)); do
     log_file="${DECODE_LOG_DIR}/dp${rank}.log"
-    wait_log_marker "${log_file}" "restarting workers of EVERY DP instance" || exit 1
-    wait_log_marker "${log_file}" "Full-restart barrier passed" || exit 1
+    wait_log_marker "${log_file}" "restarting workers of EVERY DP instance" \
+        "${RESTART_TIMEOUT}" "${RESTART_BASELINE[${rank}]}" \
+        "skipping redundant worker restart" || fail_wait
+    wait_log_marker "${log_file}" "Full-restart barrier passed" \
+        "${RESTART_TIMEOUT}" "${BARRIER_BASELINE[${rank}]}" \
+        "skipping redundant worker restart" || fail_wait
 done
 
 echo "[trigger-decode-recover] waiting for all ${DECODE_DP_SIZE} decode engines ..."
