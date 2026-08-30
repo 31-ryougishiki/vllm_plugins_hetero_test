@@ -19,6 +19,7 @@
 #   ssh   通过 SSH_DECODE 在 D 节点执行 decode/trigger_decode_fault.sh（默认）
 #   local D 与 P 同节点，直接在本地执行 trigger 脚本
 #   skip  认为 D 已经完成降级，只做 P 侧复测与对比
+#   dc    通过决策中心 /test/trigger_fault 触发
 #
 # 关键环境变量：
 #   DECODE_HOST / SSH_DECODE / DECODE_FAULT_NPU / TRIGGER_MODE /
@@ -67,7 +68,7 @@ REQUIRE_OUTPUT_MATCH="${REQUIRE_OUTPUT_MATCH:-1}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-900}"
 WARMUP_RETRIES="${WARMUP_RETRIES:-30}"
 WARMUP_INTERVAL="${WARMUP_INTERVAL:-10}"
-# warmup 数量在基线前设为 DECODE_DP_SIZE，D 降级后设为 NEW_DECODE_DP。
+# warmup 数量在基线前设为 DECODE_DP_SIZE，D 降级后设为存活 decoder 数。
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-${DECODE_DP_SIZE}}"
 REQUEST_TEMPERATURE="${REQUEST_TEMPERATURE:-0.0}"
 REQUEST_SEED="${REQUEST_SEED:-1024}"
@@ -89,6 +90,10 @@ export PROXY_HOST PROXY_PORT PYTHON_BIN
 
 mkdir -p "${SCENARIO_LOG_DIR}"
 
+TAG_PREFIX="[scenario2]"
+# shellcheck source=common.sh
+source "${SCRIPT_DIR}/common.sh"
+
 echo "============================================================"
 echo "[scenario2] prefill node: ${LOCAL_IP}  (DP4TP4 unchanged)"
 echo "[scenario2] decode node : ${DECODE_HOST} (DP${DECODE_DP_SIZE}TP1 -> DP${NEW_DECODE_DP}TP1)"
@@ -98,123 +103,11 @@ echo "[scenario2] proxy       : ${PROXY_URL}"
 echo "[scenario2] output dir  : ${SCENARIO_LOG_DIR}"
 echo "============================================================"
 
-check_http() {
-    local host="$1"
-    local port="$2"
-    local path="${3:-/health}"
-    "${PYTHON_BIN}" - "${host}" "${port}" "${path}" <<'PY'
-import sys
-import urllib.request
-
-host, port, path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-try:
-    with opener.open(f"http://{host}:{port}{path}", timeout=5) as resp:
-        sys.exit(0 if resp.status == 200 else 1)
-except Exception:
-    sys.exit(1)
-PY
-}
-
-wait_http() {
-    local label="$1"
-    local host="$2"
-    local port="$3"
-    local path="${4:-/health}"
-    local timeout="${5:-600}"
-    echo "[scenario2] wait ${label} http://${host}:${port}${path}"
-    for _attempt in $(seq 1 $((timeout / 2))); do
-        if check_http "${host}" "${port}" "${path}"; then
-            echo "[scenario2] ${label} is ready"
-            return 0
-        fi
-        sleep 2
-    done
-    echo "[scenario2][ERROR] timeout waiting for ${label}" >&2
-    return 1
-}
-
-all_http_ready() {
-    local host="$1"
-    local port_start="$2"
-    local count="$3"
-    local path="${4:-/health}"
-    local ready=0
-    for ((i = 0; i < count; i++)); do
-        if check_http "${host}" "$((port_start + i))" "${path}"; then
-            ready=$((ready + 1))
-        fi
-    done
-    [[ "${ready}" -eq "${count}" ]]
-}
-
-run_warmup() {
-    local label="$1"
-    local log_file="${SCENARIO_LOG_DIR}/${label}_warmup.log"
-    local successes=0
-    local max_attempts=$((WARMUP_REQUESTS + WARMUP_RETRIES))
-    echo "[scenario2] ${label}: warming up PD chain "
-    echo "  (need ${WARMUP_REQUESTS} successful requests to cover all active decoders)"
-    for attempt in $(seq 1 "${max_attempts}"); do
-        if "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
-                --url "${PROXY_URL}" \
-                --model dsv4 \
-                --prompt "${PROMPT}" \
-                --max-tokens 8 \
-                --temperature "${REQUEST_TEMPERATURE}" \
-                --seed "${REQUEST_SEED}" \
-                --output "${SCENARIO_LOG_DIR}/${label}_warmup_${successes}.json" \
-                --timeout 300 \
-                > "${log_file}" 2>&1; then
-            finish="$(grep '^FINISH_REASON=' "${log_file}" | tail -n 1 || true)"
-            if [[ "${finish}" == "FINISH_REASON=recomputed" ]]; then
-                echo "[scenario2] ${label}: warmup attempt=${attempt} still recomputed"
-                sleep "${WARMUP_INTERVAL}"
-                continue
-            fi
-            successes=$((successes + 1))
-            echo "[scenario2] ${label}: warmup ${successes}/${WARMUP_REQUESTS} ${finish}"
-            if (( successes >= WARMUP_REQUESTS )); then
-                echo "[scenario2] ${label}: PD chain warmup completed"
-                return 0
-            fi
-        else
-            echo "[scenario2] ${label}: warmup attempt=${attempt} failed"
-            sleep "${WARMUP_INTERVAL}"
-        fi
-    done
-    echo "[scenario2][ERROR] ${label}: PD chain did not become ready "
-    echo "  (only ${successes}/${WARMUP_REQUESTS} successful warmups)" >&2
-    tail -n 20 "${log_file}" >&2 || true
-    return 1
-}
-
+# P 端“已重启”日志计数：后面用于证明 P 保持未变。
 prefill_restart_marker_count() {
     local dp_rank="$1"
     grep -c "restarting workers of EVERY DP instance" \
         "${PREFILL_LOG_DIR}/dp${dp_rank}.log" 2>/dev/null || echo 0
-}
-
-remove_proxy_instance() {
-    local host="$1"
-    local port="$2"
-    "${PYTHON_BIN}" - "${PROXY_API_HOST}" "${PROXY_PORT}" "${host}" "${port}" <<'PY'
-import json
-import sys
-import urllib.request
-
-proxy_host, proxy_port, host, port = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
-payload = {"type": "decode", "instances": f"{host}:{port}"}
-data = json.dumps(payload).encode("utf-8")
-url = f"http://{proxy_host}:{proxy_port}/instances/remove"
-req = urllib.request.Request(
-    url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(req, timeout=30) as resp:
-    body = resp.read().decode("utf-8", errors="replace")
-print(body)
-PY
 }
 
 # ------------------------------------------------------------------
@@ -264,22 +157,7 @@ wait_http "proxy" "${PROXY_HOST}" "${PROXY_PORT}" /healthcheck 120 || exit 1
 # ------------------------------------------------------------------
 WARMUP_REQUESTS="${DECODE_DP_SIZE}"
 run_warmup "baseline" || exit 1
-echo "[scenario2] baseline request (DP16TP1 decode) ..."
-if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
-        --url "${PROXY_URL}" \
-        --model dsv4 \
-        --prompt "${PROMPT}" \
-        --max-tokens "${MAX_TOKENS}" \
-        --temperature "${REQUEST_TEMPERATURE}" \
-        --seed "${REQUEST_SEED}" \
-        --output "${PRE_OUTPUT}" \
-        --timeout 600 \
-        > "${SCENARIO_LOG_DIR}/pre_request.log" 2>&1; then
-    echo "[scenario2][ERROR] baseline request failed" >&2
-    cat "${SCENARIO_LOG_DIR}/pre_request.log" >&2
-    exit 1
-fi
-grep "RESULT_TEXT=" "${SCENARIO_LOG_DIR}/pre_request.log"
+send_request "baseline" "${PRE_OUTPUT}" || exit 1
 
 # 记录 P 端“已重启”日志基线，后面用于证明 P 保持未变。
 BEFORE_PREFILL_MARKERS=()
@@ -293,36 +171,14 @@ done
 # ------------------------------------------------------------------
 case "${TRIGGER_MODE}" in
     ssh)
-        if [[ -z "${SSH_DECODE}" ]]; then
-            echo "[scenario2][ERROR] TRIGGER_MODE=ssh requires SSH_DECODE=root@<decode-ip>" >&2
-            exit 1
-        fi
-        echo "[scenario2] triggering decode fault via ssh ${SSH_DECODE} ..."
-        if ! ssh "${SSH_DECODE}" \
-            "cd '${DECODE_TEST_DIR}' && \
-             LOCAL_IP='${DECODE_HOST}' NIC='${NIC}' \
-             DECODE_FAULT_NPU='${DECODE_FAULT_NPU}' \
-             DECODE_DP_SIZE='${DECODE_DP_SIZE}' \
-             DECODE_ITS_PORT_START='${DECODE_ITS_PORT_START}' \
-             DECODE_VLLM_PORT_START='${DECODE_VLLM_PORT_START}' \
-             DECODE_LOG_DIR='${DECODE_LOG_DIR}' \
-             RESTART_TIMEOUT='${RESTART_TIMEOUT}' \
-             bash decode/trigger_decode_fault.sh" \
-            | tee "${SCENARIO_LOG_DIR}/trigger_decode.log"; then
+        if ! trigger_decode_remote fault \
+                | tee "${SCENARIO_LOG_DIR}/trigger_decode.log"; then
             echo "[scenario2][ERROR] remote decode trigger failed" >&2
             exit 1
         fi
         ;;
     local)
-        echo "[scenario2] triggering decode fault locally ..."
-        if ! LOCAL_IP="${DECODE_HOST}" \
-                DECODE_FAULT_NPU="${DECODE_FAULT_NPU}" \
-                DECODE_DP_SIZE="${DECODE_DP_SIZE}" \
-                DECODE_ITS_PORT_START="${DECODE_ITS_PORT_START}" \
-                DECODE_VLLM_PORT_START="${DECODE_VLLM_PORT_START}" \
-                DECODE_LOG_DIR="${DECODE_LOG_DIR}" \
-                RESTART_TIMEOUT="${RESTART_TIMEOUT}" \
-                bash "${SCRIPT_DIR}/decode/trigger_decode_fault.sh" \
+        if ! trigger_decode_local fault \
                 | tee "${SCENARIO_LOG_DIR}/trigger_decode.log"; then
             echo "[scenario2][ERROR] local decode trigger failed" >&2
             exit 1
@@ -333,31 +189,9 @@ case "${TRIGGER_MODE}" in
         ;;
     dc)
         echo "[scenario2] trigger mode=decision_center url=${DECISION_CENTER_URL}"
-        if ! "${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${DECODE_HOST}" \
-                "${DECODE_FAULT_NPU}" <<'PY'
-import json
-import sys
-import urllib.request
-
-url, node_ip, npu_id = sys.argv[1], sys.argv[2], sys.argv[3]
-payload = {"node_ip": node_ip, "npu_id": str(npu_id), "fault_code": "80E78000"}
-data = json.dumps(payload).encode("utf-8")
-req = urllib.request.Request(
-    f"{url.rstrip('/')}/api/v1/decision_center/test/trigger_fault",
-    data=data,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(req, timeout=60) as resp:
-    body = resp.read().decode("utf-8", errors="replace")
-print(f"HTTP {resp.status} -> {body}")
-if resp.status != 200:
-    sys.exit(1)
-PY
-        then
-            echo "[scenario2] decision center accepted decode fault" \
-                | tee "${SCENARIO_LOG_DIR}/trigger_dc.log"
+        if dc_trigger_fault "${DECODE_HOST}" "${DECODE_FAULT_NPU}" \
+                | tee "${SCENARIO_LOG_DIR}/trigger_dc.log"; then
+            echo "[scenario2] decision center accepted decode fault"
         else
             echo "[scenario2][ERROR] decision center trigger_fault failed" >&2
             exit 1
@@ -444,22 +278,7 @@ fi
 # ------------------------------------------------------------------
 WARMUP_REQUESTS="${ACTIVE_DECODE_COUNT}"
 run_warmup "post_degrade" || exit 1
-echo "[scenario2] post-degrade request (DP15TP1 decode) ..."
-if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
-        --url "${PROXY_URL}" \
-        --model dsv4 \
-        --prompt "${PROMPT}" \
-        --max-tokens "${MAX_TOKENS}" \
-        --temperature "${REQUEST_TEMPERATURE}" \
-        --seed "${REQUEST_SEED}" \
-        --output "${POST_OUTPUT}" \
-        --timeout 600 \
-        > "${SCENARIO_LOG_DIR}/post_request.log" 2>&1; then
-    echo "[scenario2][ERROR] post-degrade request failed" >&2
-    cat "${SCENARIO_LOG_DIR}/post_request.log" >&2
-    exit 1
-fi
-grep "RESULT_TEXT=" "${SCENARIO_LOG_DIR}/post_request.log"
+send_request "post_degrade" "${POST_OUTPUT}" || exit 1
 
 # ------------------------------------------------------------------
 # 9. 确认 P 端日志没有新增“restarting workers”记录。
@@ -481,36 +300,9 @@ echo "[scenario2] prefill side unchanged (no new restart markers)"
 # ------------------------------------------------------------------
 # 10. 对比两次输出。
 # ------------------------------------------------------------------
-echo "[scenario2] comparing pre/post outputs ..."
-"${PYTHON_BIN}" - "${PRE_OUTPUT}" "${POST_OUTPUT}" "${REQUIRE_OUTPUT_MATCH}" <<'PY'
-import json
-import sys
-
-pre_path, post_path, require_match = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-pre = json.load(open(pre_path, encoding="utf-8"))
-post = json.load(open(post_path, encoding="utf-8"))
-pre_text = (pre.get("choices") or [{}])[0].get("text") or ""
-post_text = (post.get("choices") or [{}])[0].get("text") or ""
-pre_reason = (pre.get("choices") or [{}])[0].get("finish_reason")
-post_reason = (post.get("choices") or [{}])[0].get("finish_reason")
-
-print(f"PRE_TEXT={pre_text!r}")
-print(f"POST_TEXT={post_text!r}")
-print(f"PRE_FINISH={pre_reason} POST_FINISH={post_reason}")
-print(f"MATCH={pre_text == post_text}")
-
-if not post_text:
-    print("[FAIL] post-degrade output is empty")
-    sys.exit(1)
-if require_match and pre_text != post_text:
-    print("[FAIL] post-degrade output differs from baseline")
-    print("       check logs under logs/pd_scenario2, logs/prefill, logs/decode")
-    sys.exit(2)
-if require_match:
-    print("[PASS] decode DP16TP1 -> DP15TP1 output is identical to baseline")
-else:
-    print("[WARN] REQUIRE_OUTPUT_MATCH=0, text difference is not treated as failure")
-PY
+compare_outputs "${PRE_OUTPUT}" "${POST_OUTPUT}" "${REQUIRE_OUTPUT_MATCH}" \
+    "post-degrade output differs from baseline" \
+    "decode DP16TP1 -> DP15TP1 output is identical to baseline"
 RC=$?
 if [[ ${RC} -ne 0 ]]; then
     echo "[scenario2] test finished with failure (rc=${RC})" >&2

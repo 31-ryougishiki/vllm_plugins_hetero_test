@@ -37,10 +37,12 @@ vllm_plugins 的测试路径是
 ```text
 pd_hetero/
 ├── README.md
+├── common.sh                        # 场景编排公共函数库（check/wait/warmup/请求/对比/触发）
 ├── run_scenario1.sh                # 场景1编排：P 转异构，D 不变
 ├── run_scenario2.sh                # 场景2编排：D 坏1卡缩容，P 不变
 ├── run_scenario3.sh                # 场景3编排：P/D RECOVER 恢复对称拓扑
 ├── send_pd_request.py              # 经代理发请求并保存/校验输出
+├── proxy_instance.py               # 代理实例 add/remove 工具
 ├── check_decode_unchanged.sh       # 场景1校验 D 端健康且未被重启
 ├── decode/
 │   ├── launch_decode_pd.sh         # D 节点启动 dp16/tp1
@@ -52,6 +54,9 @@ pd_hetero/
     ├── start_proxy_pd.sh           # P 节点启动 PD 代理
     └── load_balance_proxy_server.py
 ```
+
+> 三个 `run_scenario*.sh` 都会 source 同目录的 `common.sh`。修改公共函数等于
+> 同时改动三个场景，提交前需要回归手动直连 executor 与决策中心两条触发路径。
 
 根目录另有 `trigger_prefill_recover.sh`，供场景 3 触发 P 端
 `DP4TP(3,4,4,4) -> DP4TP4`。

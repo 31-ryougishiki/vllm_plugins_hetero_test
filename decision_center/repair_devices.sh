@@ -17,6 +17,7 @@
 set -euo pipefail
 
 DECISION_CENTER_URL="${DECISION_CENTER_URL:-http://7.246.78.79:8088}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 if [[ $# -gt 0 ]]; then
     REPAIR_PAIRS="$(IFS=,; echo "$*")"
 else
@@ -31,7 +32,7 @@ fi
 echo "[repair-devices] decision center: ${DECISION_CENTER_URL}"
 echo "[repair-devices] pairs          : ${REPAIR_PAIRS}"
 
-python3 - "${DECISION_CENTER_URL}" "${REPAIR_PAIRS}" <<'PY'
+"${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${REPAIR_PAIRS}" <<'PY'
 import json
 import sys
 import urllib.request

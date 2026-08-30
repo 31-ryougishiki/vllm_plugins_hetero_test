@@ -22,7 +22,7 @@
 #
 # RECOVER_TARGET 控制恢复范围：
 #   both（默认） / prefill（只恢复场景1）/ decode（只恢复场景2）。
-# D 端触发方式 TRIGGER_MODE 与场景 2 相同：ssh / local。
+# D 端触发方式 TRIGGER_MODE 与场景 2 相同：ssh / local / dc。
 #
 # 关键环境变量：
 #   DECODE_HOST / SSH_DECODE / RECOVER_TARGET / TRIGGER_MODE /
@@ -90,6 +90,10 @@ export PROXY_HOST PROXY_PORT PYTHON_BIN
 
 mkdir -p "${SCENARIO_LOG_DIR}"
 
+TAG_PREFIX="[scenario3]"
+# shellcheck source=common.sh
+source "${SCRIPT_DIR}/common.sh"
+
 case "${RECOVER_TARGET}" in
     both) DO_PREFILL=1; DO_DECODE=1 ;;
     prefill) DO_PREFILL=1; DO_DECODE=0 ;;
@@ -137,137 +141,6 @@ echo "[scenario3] baseline    : ${PRE_OUTPUT}"
 echo "[scenario3] output dir  : ${SCENARIO_LOG_DIR}"
 echo "============================================================"
 
-check_http() {
-    local host="$1"
-    local port="$2"
-    local path="${3:-/health}"
-    "${PYTHON_BIN}" - "${host}" "${port}" "${path}" <<'PY'
-import sys
-import urllib.request
-
-host, port, path = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-try:
-    with opener.open(f"http://{host}:{port}{path}", timeout=5) as resp:
-        sys.exit(0 if resp.status == 200 else 1)
-except Exception:
-    sys.exit(1)
-PY
-}
-
-wait_http() {
-    local label="$1"
-    local host="$2"
-    local port="$3"
-    local path="${4:-/health}"
-    local timeout="${5:-600}"
-    echo "[scenario3] wait ${label} http://${host}:${port}${path}"
-    for _attempt in $(seq 1 $((timeout / 2))); do
-        if check_http "${host}" "${port}" "${path}"; then
-            echo "[scenario3] ${label} is ready"
-            return 0
-        fi
-        sleep 2
-    done
-    echo "[scenario3][ERROR] timeout waiting for ${label}" >&2
-    return 1
-}
-
-all_http_ready() {
-    local host="$1"
-    local port_start="$2"
-    local count="$3"
-    local path="${4:-/health}"
-    local ready=0
-    for ((i = 0; i < count; i++)); do
-        if check_http "${host}" "$((port_start + i))" "${path}"; then
-            ready=$((ready + 1))
-        fi
-    done
-    [[ "${ready}" -eq "${count}" ]]
-}
-
-wait_log_marker() {
-    local label="$1"
-    local log_file="$2"
-    local marker="$3"
-    local timeout="${4:-600}"
-    echo "[scenario3] wait ${label} marker in ${log_file}"
-    for _attempt in $(seq 1 $((timeout / 2))); do
-        if grep -q "${marker}" "${log_file}" 2>/dev/null; then
-            echo "[scenario3] ${label}: found '${marker}'"
-            return 0
-        fi
-        sleep 2
-    done
-    echo "[scenario3][ERROR] timeout waiting for '${marker}' in ${log_file}" >&2
-    return 1
-}
-
-run_warmup() {
-    local label="$1"
-    local needed="$2"
-    local log_file="${SCENARIO_LOG_DIR}/${label}_warmup.log"
-    local successes=0
-    local max_attempts=$((needed + WARMUP_RETRIES))
-    echo "[scenario3] ${label}: warming up PD chain "
-    echo "  (need ${needed} successful requests to cover all active decoders)"
-    for attempt in $(seq 1 "${max_attempts}"); do
-        if "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
-                --url "${PROXY_URL}" \
-                --model dsv4 \
-                --prompt "${PROMPT}" \
-                --max-tokens 8 \
-                --temperature "${REQUEST_TEMPERATURE}" \
-                --seed "${REQUEST_SEED}" \
-                --output "${SCENARIO_LOG_DIR}/${label}_warmup_${successes}.json" \
-                --timeout 300 \
-                > "${log_file}" 2>&1; then
-            finish="$(grep '^FINISH_REASON=' "${log_file}" | tail -n 1 || true)"
-            if [[ "${finish}" == "FINISH_REASON=recomputed" ]]; then
-                echo "[scenario3] ${label}: warmup attempt=${attempt} still recomputed"
-                sleep "${WARMUP_INTERVAL}"
-                continue
-            fi
-            successes=$((successes + 1))
-            echo "[scenario3] ${label}: warmup ${successes}/${needed} ${finish}"
-            if (( successes >= needed )); then
-                echo "[scenario3] ${label}: PD chain warmup completed"
-                return 0
-            fi
-        else
-            echo "[scenario3] ${label}: warmup attempt=${attempt} failed"
-            sleep "${WARMUP_INTERVAL}"
-        fi
-    done
-    echo "[scenario3][ERROR] ${label}: PD chain did not become ready "
-    echo "  (only ${successes}/${needed} successful warmups)" >&2
-    tail -n 20 "${log_file}" >&2 || true
-    return 1
-}
-
-add_proxy_instance() {
-    local host="$1"
-    local port="$2"
-    "${PYTHON_BIN}" - "${PROXY_API_HOST}" "${PROXY_PORT}" "${host}" "${port}" <<'PY'
-import json
-import sys
-import urllib.request
-
-proxy_host, proxy_port, host, port = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
-payload = {"type": "decode", "instances": f"{host}:{port}"}
-data = json.dumps(payload).encode("utf-8")
-url = f"http://{proxy_host}:{proxy_port}/instances/add"
-req = urllib.request.Request(
-    url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(req, timeout=30) as resp:
-    body = resp.read().decode("utf-8", errors="replace")
-print(body)
-PY
-}
-
 # ------------------------------------------------------------------
 # 1. 前置状态校验：P 4 个 engine 在线（异构或对称均可），
 #    D 15 个健康 + 故障 executor 空转，代理在线。
@@ -301,40 +174,16 @@ if [[ "${DO_PREFILL}" == "1" ]]; then
 
     echo "[scenario3] triggering prefill RECOVER DP4TP(3,4,4,4) -> DP4TP4 ..."
     if [[ "${TRIGGER_MODE}" == "dc" ]]; then
-        if ! "${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${FAULT_NODE_IP}" \
-                "${FAULT_NPU}" "${DECODE_HOST}" "${DECODE_FAULT_NPU}" \
-                "${DO_DECODE}" <<'PY'
-import json
-import sys
-import urllib.request
-
-url = sys.argv[1]
-p_node, p_npu = sys.argv[2], sys.argv[3]
-d_node, d_npu = sys.argv[4], sys.argv[5]
-include_decode = sys.argv[6] == "1"
-
-payload = [{"node_ip": p_node, "npu_id": str(p_npu)}]
-if include_decode:
-    payload.append({"node_ip": d_node, "npu_id": str(d_npu)})
-data = json.dumps(payload).encode("utf-8")
-req = urllib.request.Request(
-    f"{url.rstrip('/')}/api/v1/decision_center/repair/devices",
-    data=data,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(req, timeout=60) as resp:
-    body = resp.read().decode("utf-8", errors="replace")
-print(f"HTTP {resp.status} -> {body}")
-if resp.status != 200:
-    sys.exit(1)
-PY
-        then
+        # dc + both 时把 P/D 坏卡合并到同一次 repair/devices 请求。
+        REPAIR_ARGS=("${FAULT_NODE_IP}:${FAULT_NPU}")
+        if [[ "${DO_DECODE}" == "1" ]]; then
+            REPAIR_ARGS+=("${DECODE_HOST}:${DECODE_FAULT_NPU}")
+        fi
+        if dc_repair_devices "${REPAIR_ARGS[@]}" \
+                | tee "${SCENARIO_LOG_DIR}/trigger_prefill_recover.log"; then
             DC_REPAIR_SENT=1
             echo "[scenario3] decision center accepted repair: ${FAULT_NODE_IP}/${FAULT_NPU}" \
-                "$( [[ ${DO_DECODE} -eq 1 ]] && echo + ${DECODE_HOST}/${DECODE_FAULT_NPU} || true )" \
-                | tee "${SCENARIO_LOG_DIR}/trigger_prefill_recover.log"
+                "$( [[ ${DO_DECODE} -eq 1 ]] && echo + ${DECODE_HOST}/${DECODE_FAULT_NPU} || true )"
         else
             echo "[scenario3][ERROR] decision center repair/devices failed" >&2
             exit 1
@@ -382,36 +231,14 @@ fi
 if [[ "${DO_DECODE}" == "1" ]]; then
     case "${TRIGGER_MODE}" in
         ssh)
-            if [[ -z "${SSH_DECODE}" ]]; then
-                echo "[scenario3][ERROR] TRIGGER_MODE=ssh requires SSH_DECODE=root@<decode-ip>" >&2
-                exit 1
-            fi
-            echo "[scenario3] triggering decode RECOVER via ssh ${SSH_DECODE} ..."
-            if ! ssh "${SSH_DECODE}" \
-                "cd '${DECODE_TEST_DIR}' && \
-                 LOCAL_IP='${DECODE_HOST}' NIC='${NIC}' \
-                 DECODE_FAULT_NPU='${DECODE_FAULT_NPU}' \
-                 DECODE_DP_SIZE='${DECODE_DP_SIZE}' \
-                 DECODE_ITS_PORT_START='${DECODE_ITS_PORT_START}' \
-                 DECODE_VLLM_PORT_START='${DECODE_VLLM_PORT_START}' \
-                 DECODE_LOG_DIR='${DECODE_LOG_DIR}' \
-                 RESTART_TIMEOUT='${RESTART_TIMEOUT}' \
-                 bash decode/trigger_decode_recover.sh" \
-                | tee "${SCENARIO_LOG_DIR}/trigger_decode_recover.log"; then
+            if ! trigger_decode_remote recover \
+                    | tee "${SCENARIO_LOG_DIR}/trigger_decode_recover.log"; then
                 echo "[scenario3][ERROR] remote decode RECOVER trigger failed" >&2
                 exit 1
             fi
             ;;
         local)
-            echo "[scenario3] triggering decode RECOVER locally ..."
-            if ! LOCAL_IP="${DECODE_HOST}" \
-                    DECODE_FAULT_NPU="${DECODE_FAULT_NPU}" \
-                    DECODE_DP_SIZE="${DECODE_DP_SIZE}" \
-                    DECODE_ITS_PORT_START="${DECODE_ITS_PORT_START}" \
-                    DECODE_VLLM_PORT_START="${DECODE_VLLM_PORT_START}" \
-                    DECODE_LOG_DIR="${DECODE_LOG_DIR}" \
-                    RESTART_TIMEOUT="${RESTART_TIMEOUT}" \
-                    bash "${SCRIPT_DIR}/decode/trigger_decode_recover.sh" \
+            if ! trigger_decode_local recover \
                     | tee "${SCENARIO_LOG_DIR}/trigger_decode_recover.log"; then
                 echo "[scenario3][ERROR] local decode RECOVER trigger failed" >&2
                 exit 1
@@ -421,31 +248,9 @@ if [[ "${DO_DECODE}" == "1" ]]; then
             echo "[scenario3] trigger mode=decision_center url=${DECISION_CENTER_URL}"
             if [[ "${DC_REPAIR_SENT}" == "1" ]]; then
                 echo "[scenario3] decode repair already included in combined repair request, skip second POST"
-            elif ! "${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${DECODE_HOST}" \
-                    "${DECODE_FAULT_NPU}" <<'PY'
-import json
-import sys
-import urllib.request
-
-url, node_ip, npu_id = sys.argv[1], sys.argv[2], sys.argv[3]
-payload = [{"node_ip": node_ip, "npu_id": str(npu_id)}]
-data = json.dumps(payload).encode("utf-8")
-req = urllib.request.Request(
-    f"{url.rstrip('/')}/api/v1/decision_center/repair/devices",
-    data=data,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(req, timeout=60) as resp:
-    body = resp.read().decode("utf-8", errors="replace")
-print(f"HTTP {resp.status} -> {body}")
-if resp.status != 200:
-    sys.exit(1)
-PY
-            then
-                echo "[scenario3] decision center accepted decode repair" \
-                    | tee "${SCENARIO_LOG_DIR}/trigger_decode_recover.log"
+            elif dc_repair_devices "${DECODE_HOST}:${DECODE_FAULT_NPU}" \
+                    | tee "${SCENARIO_LOG_DIR}/trigger_decode_recover.log"; then
+                echo "[scenario3] decision center accepted decode repair"
             else
                 echo "[scenario3][ERROR] decision center repair/devices failed" >&2
                 exit 1
@@ -482,60 +287,11 @@ if [[ "${DO_DECODE}" == "0" ]]; then
     ACTIVE_DECODERS="${NEW_DECODE_DP}"
 fi
 run_warmup "post_recover" "${ACTIVE_DECODERS}" || exit 1
+send_request "post_recover" "${POST_OUTPUT}" || exit 1
 
-echo "[scenario3] post-recover request (P DP4TP4, D DP${ACTIVE_DECODERS}TP1) ..."
-if ! "${PYTHON_BIN}" "${SCRIPT_DIR}/send_pd_request.py" \
-        --url "${PROXY_URL}" \
-        --model dsv4 \
-        --prompt "${PROMPT}" \
-        --max-tokens "${MAX_TOKENS}" \
-        --temperature "${REQUEST_TEMPERATURE}" \
-        --seed "${REQUEST_SEED}" \
-        --output "${POST_OUTPUT}" \
-        --timeout 600 \
-        > "${SCENARIO_LOG_DIR}/post_request.log" 2>&1; then
-    echo "[scenario3][ERROR] post-recover request failed" >&2
-    cat "${SCENARIO_LOG_DIR}/post_request.log" >&2
-    exit 1
-fi
-grep "RESULT_TEXT=" "${SCENARIO_LOG_DIR}/post_request.log"
-
-if [[ ! -f "${PRE_OUTPUT}" ]]; then
-    echo "[scenario3][WARN] baseline ${PRE_OUTPUT} not found; only checking non-empty output" >&2
-    REQUIRE_OUTPUT_MATCH=0
-fi
-echo "[scenario3] comparing recovered output with baseline ..."
-"${PYTHON_BIN}" - "${PRE_OUTPUT}" "${POST_OUTPUT}" "${REQUIRE_OUTPUT_MATCH}" <<'PY'
-import json
-import sys
-
-pre_path, post_path, require_match = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
-post = json.load(open(post_path, encoding="utf-8"))
-post_text = (post.get("choices") or [{}])[0].get("text") or ""
-
-if require_match:
-    pre = json.load(open(pre_path, encoding="utf-8"))
-    pre_text = (pre.get("choices") or [{}])[0].get("text") or ""
-    print(f"PRE_TEXT={pre_text!r}")
-else:
-    pre_text = None
-    print("PRE_TEXT=<skipped: no baseline or match disabled>")
-
-print(f"POST_TEXT={post_text!r}")
-print(f"MATCH={pre_text == post_text if pre_text is not None else 'N/A'}")
-
-if not post_text:
-    print("[FAIL] post-recover output is empty")
-    sys.exit(1)
-if require_match and pre_text is not None and pre_text != post_text:
-    print("[FAIL] post-recover output differs from pre-degrade baseline")
-    print("       check logs under logs/pd_scenario3, logs/prefill, logs/decode")
-    sys.exit(2)
-if require_match:
-    print("[PASS] RECOVER output is identical to pre-degrade baseline")
-else:
-    print("[WARN] REQUIRE_OUTPUT_MATCH=0, text difference is not treated as failure")
-PY
+compare_outputs "${PRE_OUTPUT}" "${POST_OUTPUT}" "${REQUIRE_OUTPUT_MATCH}" \
+    "post-recover output differs from pre-degrade baseline" \
+    "RECOVER output is identical to pre-degrade baseline"
 RC=$?
 if [[ ${RC} -ne 0 ]]; then
     echo "[scenario3] test finished with failure (rc=${RC})" >&2

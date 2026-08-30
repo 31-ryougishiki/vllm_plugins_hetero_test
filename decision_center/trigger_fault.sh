@@ -18,6 +18,7 @@ DECISION_CENTER_URL="${DECISION_CENTER_URL:-http://7.246.78.79:8088}"
 FAULT_NODE_IP="${1:-${FAULT_NODE_IP:-}}"
 FAULT_NPU="${2:-${FAULT_NPU:-}}"
 FAULT_CODE="${FAULT_CODE:-80E78000}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if [[ -z "${FAULT_NODE_IP}" || -z "${FAULT_NPU}" ]]; then
     echo "[trigger-fault][ERROR] usage: trigger_fault.sh <node_ip> <npu_id>" >&2
@@ -27,7 +28,7 @@ fi
 echo "[trigger-fault] decision center: ${DECISION_CENTER_URL}"
 echo "[trigger-fault] node/npu       : ${FAULT_NODE_IP}/${FAULT_NPU}"
 
-python3 - "${DECISION_CENTER_URL}" "${FAULT_NODE_IP}" "${FAULT_NPU}" \
+"${PYTHON_BIN}" - "${DECISION_CENTER_URL}" "${FAULT_NODE_IP}" "${FAULT_NPU}" \
     "${FAULT_CODE}" <<'PY'
 import json
 import sys
