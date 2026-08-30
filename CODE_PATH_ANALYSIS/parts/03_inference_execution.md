@@ -16,6 +16,7 @@ C. D 单机直连推理链（P7/P8）。
 | `inference/04_kv_transfer_timeline.md` | Mooncake 握手/拉取/线程时序 |
 | `inference/05_scheduler_kv_state_machine.md` | scheduler↔connector↔model_runner 状态迁移 |
 | `inference/06_mtp_path.md` | MTP drafter/proposer 在 prefill/decode 的路径 |
+| `inference/07_runtime_switches.md` | 测试脚本可判定的环境/配置开关与仍需运行时确认的项 |
 
 基线源码引用：`origin_0.23.0/vllm`、`origin_0.23.0/vllm-ascend`；
 实际运行文件为插件替换后的 `ITSMultiprocExecutor`/`ITSNPUWorker` 与 hetero patch。

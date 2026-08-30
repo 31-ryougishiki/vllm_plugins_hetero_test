@@ -50,7 +50,8 @@ CODE_PATH_ANALYSIS/
     │   ├── 03_decode_d_forward.md          ← D 拉 KV 后 decode 前向
     │   ├── 04_kv_transfer_timeline.md      ← Mooncake 传输时序
     │   ├── 05_scheduler_kv_state_machine.md← scheduler/KV 状态机
-    │   └── 06_mtp_path.md                  ← MTP drafter/proposer 路径
+    │   ├── 06_mtp_path.md                  ← MTP drafter/proposer 路径
+    │   └── 07_runtime_switches.md          ← 脚本可判定的运行时开关
     ├── 04_trigger.md              ← 触发（manual executor / DC）
     ├── 05_restart_recovery.md     ← 策略执行/重启/恢复
     └── 06_verify_compare.md       ← 复测与校验

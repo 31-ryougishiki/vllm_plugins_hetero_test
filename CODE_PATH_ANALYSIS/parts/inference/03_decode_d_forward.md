@@ -71,10 +71,11 @@ D 请求进入 scheduler：
 
 ## 7. 不确定点
 
+- **脚本可判定**：D 侧 `enable_dsa_cp=false`（additional_config 未设置）、
+  `enable_shared_expert_dp=false`（TP1）、`mix_placement=false`、hybrid KV=true、
+  `_prefill_tp_size=4`（launch 的 kv_connector_extra_config.prefill.tp_size=4）；
+  因此 D 走 ColumnParallel wq_b、无 TP 切分、`_transfer_kv_cache_all_groups` hybrid 路径；
 - 本文按 D DP16TP1 **homogeneous**（`is_heterogeneous_tp=False`）分析；若 D 侧也被配置
   `heterogeneous_dp_config`，`patch_deepseek_v4.py` 的 ratios 分支会执行，但 TP1 下数值不变；
-- D 端 `_prefill_tp_size` 读自 `kv_transfer_config.extra_config["prefill"]["tp_size"]`，
-  静态无法确认 P 异构后该值填 3 还是 4；MLA 下 `tp_num_need_pulls` 恒 1，影响较小；
-- `use_hybrid` 为 false 时走非 hybrid KV 传输路径；
 - 远程 KV 失败时 `invalid_block_ids` 会改变可用 tokens，本文未展开完整错误处理；
 - D 的 MoE/attention 后端选择仍取决于 NPU 图编译。

@@ -104,15 +104,12 @@ NPUModelRunner.execute_model
 
 ## 8. 不确定点
 
-- DP0 rank0 的 32 heads 依据 `[2,1,1]` 比例静态推导，实际由
-  `get_tp_partition_size`/`get_current_tp_sharding_ratios` 在运行时确认；
-- **DSA-CP 是否实际开启**由 Ascend 运行时配置决定；关闭时 wq_b 走 ColumnParallel，
-  attn_sink 走 TP 切分，异构路径会进入另一个分支；
-- **`mix_placement`** 影响共享专家是否并入 FusedMoE：若为 true，专家数按 257
-  参与余数分布，不再是 256/15 的 rank0 18/其余 17；
+- **脚本可判定**：P 侧 `enable_dsa_cp=true`、`enable_shared_expert_dp=true`、
+  `mix_placement=false`、FlashComm1 env=1（实际 SP 激活还需 token 条件）；
+  因此异构前向的 DSA-CP Replicated wq_b 分支与 256/15 专家分布（rank0 18/其余 17）成立；
 - EP 组内 rank 顺序（DP-major/TP-major）由运行时并行组构建决定，静态只能依据
   `patch_hetero_moe.py:75-108` 的反推逻辑判断；
-- FlashComm1/FlashComm2/sp_by_pass 是否开启会改变 chunk/pad/AllGather input 路径；
+- FlashComm1/2 与 sp_by_pass 的具体激活还会改变 chunk/pad/AllGather input 路径；
 - `forward_context.num_tokens` 与 `padded_num_tokens` 在 SP 路径下的口径需要实跑确认；
 - `MoECommType` 还受 `mc2_tokens_capacity` 与 quant_type 影响；
 - 图编译可能缓存不同形状分支，实际命中需实跑图 dump。

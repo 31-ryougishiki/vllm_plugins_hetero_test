@@ -113,13 +113,13 @@ EP=16 无余数，异构 patch 的 ratios 分支不生效。对 PD 解码 `seq_l
 
 ## 7. 不确定点
 
-- D 侧是否实际启用 MTP 取决于其启动参数是否同样携带 `speculative_config`；代码未强制 D
-  必须开启，但 `model_runner_v1.py:1481-1486` 对 PD 分离 seq_len=1 的 MTP 有显式支持；
+- **脚本可判定**：P/D launch 均带 `--speculative-config method=mtp`，因此 D 也会创建
+  `AscendEagleProposer`；P `enable_dsa_cp=true`、D `enable_dsa_cp=false`、
+  `mix_placement=false`（详见 `07_runtime_switches.md`）；
 - `hf_config_override` 的生效版本取决于 vllm-ascend patch 的导入时机，两版差异只是
   是否写 `n_predict`，本配置显式 `num_speculative_tokens=1` 不受影响；
 - 异构 `_sync_metadata_across_dp` 的 EP group 组成与 dp_size 槽位对应关系需运行时确认；
 - D TP1 下 MTP 的 EP 行为取决于是否开启 expert parallel；
-- `enable_dsa_cp` 在 D 侧取值影响 MTP sink 权重与 attention 实现路径；
 - 接受率/耗时差异不影响最终输出正确性（HETERO_DEBUG 回归铁律 4），但路径存在。
 
 ## 8. 张量形状速查（num_speculative_tokens=1）

@@ -100,8 +100,10 @@ NPUModelRunner._model_forward
 
 ## 8. 不确定点
 
-- FlashComm1 是否实际开启依赖 token 数>1000 等运行时条件（`patch_hetero_tp.py:100-117`）；
-- DSA-CP 是否开启由 Ascend 运行时配置决定，影响 wq_b 是 Replicated 还是 ColumnParallel；
-- `mix_placement` 影响共享专家是否并入 256 专家 FusedMoE；
+- **脚本可判定**：P 侧 `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`、`enable_dsa_cp=true`、
+  `enable_shared_expert_dp=true`、`mix_placement=false`、hybrid KV=true
+  （详见 `07_runtime_switches.md`）；
+- FlashComm1 是否对**具体某次前向**激活 SP，还取决于 `num_tokens>1000` 等运行时条件
+  （`patch_hetero_tp.py:100-117`）；
 - 图编译/ACLGraph 可能把上述 Python 路径替换为捕获图；
 - 43 层中每层的具体 attention 后端由 metadata 运行时选择。

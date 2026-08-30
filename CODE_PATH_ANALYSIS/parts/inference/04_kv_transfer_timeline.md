@@ -128,11 +128,11 @@ D 后续请求：
 
 ## 7. 不确定点
 
+- **脚本可判定**：`--no-disable-hybrid-kv-cache-manager` 使 P/D 均走 hybrid
+  `_transfer_kv_cache_all_groups` 路径；
 - 旧 `(engine_id, handshake_port)` 缓存**没有主动清理逻辑**；只有顶层 `SizedDict`
   按 engine_id 数量 FIFO 淘汰（`max_size=16000`），同一 engine_id 下的旧 port 条目会长期残留；
 - 若 P 轮换后的 engine_id 恰等于 D 的 `local_engine_id`（例如 1），握手 assert 会失败，
   轮换策略必须避开；
-- `use_hybrid` 若为 false，会走 `_transfer_kv_cache` 非 hybrid 路径而非
-  `_transfer_kv_cache_all_groups`，时序图需替换；
 - P 端发送完成由 D 的 `DONE_RECVING_MSG` 驱动，静态无法确定发送完成回传的步数上限；
 - 传输失败/超时的重试策略未实跑验证。
