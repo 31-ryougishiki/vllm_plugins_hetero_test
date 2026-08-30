@@ -29,6 +29,7 @@
 ```text
 CODE_PATH_ANALYSIS/
 ├── README.md                  ← 本文件（总索引、基线、路径表、阅读顺序）
+├── 00_PRECONDITIONS.md        ← 全部前置条件与输入假设（必读）
 ├── P1_scenario1_manual.md     ← S1 手动：P DP4TP4→DP4TP(3,4,4,4)
 ├── P2_scenario1_dc.md         ← S1 DC
 ├── P3_scenario2_ssh.md        ← S2 SSH：D DP16TP1→DP15TP1
@@ -72,14 +73,15 @@ CODE_PATH_ANALYSIS/
 
 ## 5. 阅读顺序
 
-1. 先读目标路径的 `Pn_*.md` 的“整体流程”，确认该路径由哪些阶段组成；
-2. 再按流程中的链接进入 `parts/` 子文档查看每阶段的代码行、进程、HTTP、环境变量、调用链；
-3. 启动相关阶段除 `01_install_launch.md`（脚本/插件）外，还要读
+1. 先读 `00_PRECONDITIONS.md`，确认本文档所有结论的前提条件是否成立；
+2. 读目标路径的 `Pn_*.md` 的“整体流程”，确认该路径由哪些阶段组成；
+3. 再按流程中的链接进入 `parts/` 子文档查看每阶段的代码行、进程、HTTP、环境变量、调用链；
+4. 启动相关阶段除 `01_install_launch.md`（脚本/插件）外，还要读
    `01_service_startup.md`（vLLM 引擎/worker/模型加载）；
-4. 所有带请求的阶段除 `03_baseline_request.md`（测试侧/代理侧）外，还要读
+5. 所有带请求的阶段除 `03_baseline_request.md`（测试侧/代理侧）外，还要读
    `03_inference_execution.md` 及 `inference/` 子目录（公共链、对称/异构 P 前向、
    D 拉 KV 前向、KV 时序、状态机、MTP）；
-5. 多个路径相同的阶段复用同一子文档；路径特有差异在各 `Pn_*.md` 的“本路径差异”小节中说明。
+6. 多个路径相同的阶段复用同一子文档；路径特有差异在各 `Pn_*.md` 的“本路径差异”小节中说明。
 
 ## 6. 子文档字段约定
 
