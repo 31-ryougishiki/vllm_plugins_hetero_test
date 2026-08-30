@@ -28,9 +28,9 @@ P/D 的 **20 个 executor 必须使用同一个 `VLLM_SERVICE_ID`**（默认
 
 两个节点都安装最新 vllm_plugins wheel 后，分别在对应节点执行：
 
-> 合并后的 vllm_plugins 默认走 0829 实现；DeepSeek-V4 / 决策中心场景
-> 必须使用 `VLLM_ITS_DEEPSEEK_V4=1`。`install_vllm_plugins.sh` 与
-> `launch_*_dc.sh` 已默认设置该值，安装期与运行期保持一致。
+> 合并后的 vllm_plugins 整文件替换已统一，安装阶段不依赖环境变量；
+> DeepSeek-V4 / 决策中心场景运行期必须使用 `VLLM_ITS_DEEPSEEK_V4=1`，
+> `launch_*_dc.sh` 已默认设置。
 
 ```bash
 # prefill 节点 7.246.78.75

@@ -97,8 +97,8 @@ fi
 # D 端不触发策略，但必须加载 zero_interrupt，否则 MooncakeHybridConnector
 # 的异构 engine_id/端口恢复 patch 不会生效。
 export VLLM_CUSTOM_PATCHES="${VLLM_CUSTOM_PATCHES:-zero_interrupt}"
-# patch_hetero_mooncake.py 位于合并后的 deepseekv4/ 目录，因此 D 端也必须
-# 使用 DeepSeek-V4 patch 族，且与安装时保持一致。
+# patch_hetero_mooncake.py 位于合并后的 deepseekv4/ 目录，因此 D 端
+# 运行期也必须使用 DeepSeek-V4 patch 族。
 export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 export VLLM_CUSTOM_PLUGINS_SKIP_LICENSE="${VLLM_CUSTOM_PLUGINS_SKIP_LICENSE:-1}"
 export VLLM_ITS_HTTP_SERVER_PORT_START="${DECODE_ITS_PORT_START}"

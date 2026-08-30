@@ -31,7 +31,7 @@ export WORK_ROOT MODEL_PATH LOG_DIR
 export VLLM_SERVICE_ID
 export VLLM_ITS_DECISION_CENTER_URL="${DECISION_CENTER_URL}"
 export VLLM_ITS_MAX_RETRY_COUNT="${VLLM_ITS_MAX_RETRY_COUNT:-3}"
-# D 端依赖 deepseekv4/ 下的 patch_hetero_mooncake.py，必须与安装时一致。
+# D 端依赖 deepseekv4/ 下的 patch_hetero_mooncake.py，运行期必须启用。
 export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 
 echo "============================================================"

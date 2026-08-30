@@ -55,8 +55,8 @@ NEW_DECODE_DP=$((DECODE_DP_SIZE - 1))
 export WORK_ROOT MODEL_PATH LOCAL_IP NIC
 export DECODE_DP_SIZE DECODE_VLLM_PORT_START DECODE_ITS_PORT_START
 export DECODE_LOG_DIR PYTHON_BIN
-# DeepSeek-V4 调试场景统一使用 deepseekv4 patch 族；launch_decode_pd.sh
-# 会继承该值，与安装时保持一致。
+# DeepSeek-V4 调试场景统一使用 deepseekv4 runtime patch 族；
+# launch_decode_pd.sh 会继承该值。
 export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 
 mkdir -p "${TEST_LOG_DIR}"

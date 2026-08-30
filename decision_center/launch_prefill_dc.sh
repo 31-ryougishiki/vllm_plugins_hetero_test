@@ -32,8 +32,8 @@ export WORK_ROOT MODEL_PATH LOG_DIR
 export VLLM_SERVICE_ID
 export VLLM_ITS_DECISION_CENTER_URL="${DECISION_CENTER_URL}"
 export VLLM_ITS_MAX_RETRY_COUNT="${VLLM_ITS_MAX_RETRY_COUNT:-3}"
-# 合并后的 vllm_plugins 默认走 0829；决策中心场景同样调试 DeepSeek-V4，
-# 必须与安装/普通启动脚本保持同一个 patch 族。
+# 合并后的 vllm_plugins 默认走 0829 runtime patch；决策中心场景同样
+# 调试 DeepSeek-V4，运行期统一启用 deepseekv4 patch 族。
 export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 
 echo "============================================================"

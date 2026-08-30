@@ -67,9 +67,9 @@ bash install_vllm_plugins.sh
 > 而不是 PATH 中的 `vllm serve`，避免安装和启动落到不同 Python/vLLM 环境。
 > 如需用其它解释器，安装和启动时都传 `PYTHON_BIN=/path/to/python`。
 >
-> **patch 族要求**：合并后的 `vllm_plugins` 默认走 0829 实现；本目录只调试
-> DeepSeek-V4 场景，因此 `install_vllm_plugins.sh` 与所有 launch 脚本默认
-> `export VLLM_ITS_DEEPSEEK_V4=1`，安装期与运行期必须保持同一个值。
+> **patch 族要求**：合并后的 `vllm_plugins` 的整文件替换已经统一，
+> **安装阶段不再依赖 `VLLM_ITS_DEEPSEEK_V4`**；该变量只需在运行期设置。
+> 本目录所有 launch 脚本默认 `VLLM_ITS_DEEPSEEK_V4=1`（DeepSeek-V4）。
 
 默认使用 `PIP_NO_INDEX=1` 离线构建 wheel，并执行
 `vllm_plugins/build.sh install`。安装完成后会做一次 import 校验。

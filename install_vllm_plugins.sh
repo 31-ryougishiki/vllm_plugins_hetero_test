@@ -10,8 +10,8 @@
 # 环境变量：
 #   WORK_ROOT            远程工作路径，默认 /opt/its/z30055003
 #   VLLM_PLUGINS_REPO    vllm_plugins 仓路径，默认 ${WORK_ROOT}/vllm_plugins
-#   VLLM_ITS_DEEPSEEK_V4 1=安装 DeepSeek-V4 patch 族（默认 1；
-#                        本测试目录只调试 DeepSeek-V4 场景，必须与运行期一致）
+#   VLLM_ITS_DEEPSEEK_V4 运行期 patch 族开关；安装阶段已不再依赖，
+#                        本目录 launch 脚本默认运行期使用 1
 #
 # 依赖：远程节点已安装并可直接 import vllm / vllm_ascend。
 
@@ -20,19 +20,16 @@ set -euo pipefail
 WORK_ROOT="${WORK_ROOT:-/opt/its/z30055003}"
 VLLM_PLUGINS_REPO="${VLLM_PLUGINS_REPO:-${WORK_ROOT}/vllm_plugins}"
 
-# 合并后的 vllm_plugins 默认走 0829 实现；DeepSeek-V4 场景必须在
-# setup.py 执行期就选择 deepseekv4/ 源目录，否则整文件替换会装上 0829 版本。
+# setup.py 现在安装统一替换文件，安装结果与 VLLM_ITS_DEEPSEEK_V4 无关。
+# 这里保留导出只是为了把“运行期应使用 1”的约定传给后续校验输出。
 VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 export VLLM_ITS_DEEPSEEK_V4
-PATCH_FAMILY=0829-default
-case "${VLLM_ITS_DEEPSEEK_V4}" in
-    1|true|yes|on) PATCH_FAMILY=DeepSeek-V4 ;;
-esac
 
 echo "============================================================"
 echo "[install] work root        : ${WORK_ROOT}"
 echo "[install] vllm_plugins repo: ${VLLM_PLUGINS_REPO}"
-echo "[install] patch family     : ${PATCH_FAMILY}"
+echo "[install] replacement      : unified (runtime dispatch)"
+echo "[install] runtime flag     : VLLM_ITS_DEEPSEEK_V4=${VLLM_ITS_DEEPSEEK_V4}"
 echo "============================================================"
 
 if [[ ! -d "${VLLM_PLUGINS_REPO}" ]]; then
@@ -108,14 +105,13 @@ print(f"[install] entry points         : {entry_points}")
 assert entry_points, "vllm_custom_plugins entry point not registered"
 PY
 
-# 校验 setup.py 实际替换的是 DeepSeek-V4（deepseekv4/）整文件版本。
-# 若这里失败，说明 VLLM_ITS_DEEPSEEK_V4 没有在 pip wheel 时被继承。
+# 校验 setup.py 安装的统一替换文件同时包含 DeepSeek-V4 与 0829 能力。
 python3 - <<'PY'
 import vllm.config.parallel as vp
 
 assert hasattr(vp.ParallelConfig, "is_heterogeneous_tp"), (
     "vllm/config/parallel.py lacks DeepSeek-V4 HeterogeneousDPConfig support; "
-    "setup.py may have installed the 0829 default replacement."
+    "setup.py may not have installed the unified replacement."
 )
 assert hasattr(vp.ParallelConfig, "get_tp_size_for_dp"), (
     "vllm/config/parallel.py lacks get_tp_size_for_dp."
@@ -124,7 +120,7 @@ assert hasattr(vp.ParallelConfig, "get_tp_size_for_dp"), (
 import vllm_custom_plugins.plugins.zero_interrupt.deepseekv4.patch as dsv4_patch
 assert hasattr(dsv4_patch, "apply"), "deepseekv4 patch module not packaged"
 
-print("[install] DeepSeek-V4 whole-file replacement verified")
+print("[install] unified DeepSeek-V4/0829 replacement verified")
 PY
 
 echo "[install] done."

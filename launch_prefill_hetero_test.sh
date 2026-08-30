@@ -93,8 +93,8 @@ fi
 
 # ---------------- vllm_plugins / zero_interrupt ----------------
 export VLLM_CUSTOM_PATCHES="${VLLM_CUSTOM_PATCHES:-zero_interrupt}"
-# 合并后的 vllm_plugins 默认走 0829 实现；DeepSeek-V4 调试场景必须显式选择
-# deepseekv4 patch 族。该值必须与 install_vllm_plugins.sh 安装时一致。
+# 合并后的 vllm_plugins 默认走 0829 runtime patch；DeepSeek-V4 调试场景
+# 必须在运行期显式选择 deepseekv4 patch 族。
 export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 # 纯脚本测试默认跳过 license 校验；生产环境务必去掉该变量并配置
 # LICENSE_PATH / CERT_PATH / PRODUCT_KEY_PATH。
