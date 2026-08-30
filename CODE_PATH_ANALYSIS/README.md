@@ -42,7 +42,15 @@ CODE_PATH_ANALYSIS/
     ├── 01_service_startup.md      ← 拉起后推理服务启动链（vLLM 引擎/worker/模型加载）
     ├── 02_health_proxy.md         ← 健康检查/代理
     ├── 03_baseline_request.md     ← 基线请求（测试侧/代理侧）
-    ├── 03_inference_execution.md  ← 正常请求的推理执行链（API→EngineCore→worker→模型）
+    ├── 03_inference_execution.md  ← 正常请求的推理执行链（总览/索引）
+    ├── inference/
+    │   ├── 00_common_request_chain.md      ← 公共请求链
+    │   ├── 01_symmetric_p_forward.md       ← 对称 P 前向/形状/切分
+    │   ├── 02_hetero_p_forward.md          ← 异构 P 前向/形状/切分
+    │   ├── 03_decode_d_forward.md          ← D 拉 KV 后 decode 前向
+    │   ├── 04_kv_transfer_timeline.md      ← Mooncake 传输时序
+    │   ├── 05_scheduler_kv_state_machine.md← scheduler/KV 状态机
+    │   └── 06_mtp_path.md                  ← MTP drafter/proposer 路径
     ├── 04_trigger.md              ← 触发（manual executor / DC）
     ├── 05_restart_recovery.md     ← 策略执行/重启/恢复
     └── 06_verify_compare.md       ← 复测与校验
@@ -68,7 +76,8 @@ CODE_PATH_ANALYSIS/
 3. 启动相关阶段除 `01_install_launch.md`（脚本/插件）外，还要读
    `01_service_startup.md`（vLLM 引擎/worker/模型加载）；
 4. 所有带请求的阶段除 `03_baseline_request.md`（测试侧/代理侧）外，还要读
-   `03_inference_execution.md`（API→EngineCore→worker→模型的完整推理链）；
+   `03_inference_execution.md` 及 `inference/` 子目录（公共链、对称/异构 P 前向、
+   D 拉 KV 前向、KV 时序、状态机、MTP）；
 5. 多个路径相同的阶段复用同一子文档；路径特有差异在各 `Pn_*.md` 的“本路径差异”小节中说明。
 
 ## 6. 子文档字段约定

@@ -1,9 +1,21 @@
-# 阶段 03 补充：正常请求的推理执行路径
+# 阶段 03 补充：正常请求的推理执行路径（总览/索引）
 
 覆盖 `send_pd_request.py` 发出请求后的三种推理链：
 A. 基线 PD 代理链（P 预填充 → KV 转 D → D 续推）；
 B. 异构重启后的 PD 推理链（P 异构前向 + D 按新元数据拉 KV）；
 C. D 单机直连推理链（P7/P8）。
+
+详细推理细节已下沉到 `inference/` 子目录：
+
+| 子文档 | 内容 |
+|---|---|
+| `inference/00_common_request_chain.md` | HTTP→EngineCore→worker→模型输出的公共请求链 |
+| `inference/01_symmetric_p_forward.md` | 对称 P DP4TP4/EP16 的前向、形状与切分 |
+| `inference/02_hetero_p_forward.md` | 异构 P DP4TP(3,4,4,4)/EP15 的前向分支与张量形状 |
+| `inference/03_decode_d_forward.md` | D TP1 拉 KV 后的 decode 前向 |
+| `inference/04_kv_transfer_timeline.md` | Mooncake 握手/拉取/线程时序 |
+| `inference/05_scheduler_kv_state_machine.md` | scheduler↔connector↔model_runner 状态迁移 |
+| `inference/06_mtp_path.md` | MTP drafter/proposer 在 prefill/decode 的路径 |
 
 基线源码引用：`origin_0.23.0/vllm`、`origin_0.23.0/vllm-ascend`；
 实际运行文件为插件替换后的 `ITSMultiprocExecutor`/`ITSNPUWorker` 与 hetero patch。
