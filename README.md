@@ -66,6 +66,10 @@ bash install_vllm_plugins.sh
 > 同时，启动脚本使用 `python3 -m vllm.entrypoints.openai.api_server`，
 > 而不是 PATH 中的 `vllm serve`，避免安装和启动落到不同 Python/vLLM 环境。
 > 如需用其它解释器，安装和启动时都传 `PYTHON_BIN=/path/to/python`。
+>
+> **patch 族要求**：合并后的 `vllm_plugins` 默认走 0829 实现；本目录只调试
+> DeepSeek-V4 场景，因此 `install_vllm_plugins.sh` 与所有 launch 脚本默认
+> `export VLLM_ITS_DEEPSEEK_V4=1`，安装期与运行期必须保持同一个值。
 
 默认使用 `PIP_NO_INDEX=1` 离线构建 wheel，并执行
 `vllm_plugins/build.sh install`。安装完成后会做一次 import 校验。
@@ -122,7 +126,7 @@ for label, mod, attrs in checks:
 PY
 
 # 3. 插件 patch 注册 smoke（应打印 Applied ... heterogeneous-TP ...）
-VLLM_CUSTOM_PATCHES=zero_interrupt python3 - <<'PY'
+VLLM_ITS_DEEPSEEK_V4=1 VLLM_CUSTOM_PATCHES=zero_interrupt python3 - <<'PY'
 from vllm_custom_plugins.plugins.zero_interrupt.patch import apply
 
 apply()
@@ -130,7 +134,7 @@ print("zero_interrupt.apply() OK")
 PY
 
 # 4. deepseek_v4 tool parser 已注册（否则 api_server 会拒绝启动）
-python3 -c "from vllm.tool_parsers import ToolParserManager as M; print('deepseek_v4' in M.list_registered(), M.list_registered())"
+VLLM_ITS_DEEPSEEK_V4=1 VLLM_CUSTOM_PATCHES=zero_interrupt python3 -c "from vllm.tool_parsers import ToolParserManager as M; print('deepseek_v4' in M.list_registered(), M.list_registered())"
 ```
 
 其中第 2 步打印的每个模块都应显示 `attrs=True`；第 3 步应看到

@@ -55,6 +55,9 @@ NEW_DECODE_DP=$((DECODE_DP_SIZE - 1))
 export WORK_ROOT MODEL_PATH LOCAL_IP NIC
 export DECODE_DP_SIZE DECODE_VLLM_PORT_START DECODE_ITS_PORT_START
 export DECODE_LOG_DIR PYTHON_BIN
+# DeepSeek-V4 调试场景统一使用 deepseekv4 patch 族；launch_decode_pd.sh
+# 会继承该值，与安装时保持一致。
+export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 
 mkdir -p "${TEST_LOG_DIR}"
 
@@ -68,6 +71,7 @@ echo "[decode-alone] local ip : ${LOCAL_IP}"
 echo "[decode-alone] topology : DP${DECODE_DP_SIZE}TP1 -> DP${NEW_DECODE_DP}TP1"
 echo "[decode-alone] fault npu: ${DECODE_FAULT_NPU}"
 echo "[decode-alone] vllm ports: ${DECODE_VLLM_PORT_START}..$((DECODE_VLLM_PORT_START + DECODE_DP_SIZE - 1))"
+echo "[decode-alone] patch     : VLLM_ITS_DEEPSEEK_V4=${VLLM_ITS_DEEPSEEK_V4}"
 echo "[decode-alone] log dir  : ${TEST_LOG_DIR}"
 echo "============================================================"
 

@@ -52,6 +52,7 @@ NEW_DECODE_DP=$((DECODE_DP_SIZE - 1))
 export WORK_ROOT MODEL_PATH LOCAL_IP NIC
 export DECODE_DP_SIZE DECODE_VLLM_PORT_START DECODE_ITS_PORT_START
 export DECODE_LOG_DIR PYTHON_BIN
+export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 
 mkdir -p "${TEST_LOG_DIR}"
 
@@ -65,6 +66,7 @@ echo "[decode-recover] local ip : ${LOCAL_IP}"
 echo "[decode-recover] topology : DP${NEW_DECODE_DP}TP1 -> DP${DECODE_DP_SIZE}TP1"
 echo "[decode-recover] recovered npu: ${DECODE_FAULT_NPU}"
 echo "[decode-recover] vllm ports: ${DECODE_VLLM_PORT_START}..$((DECODE_VLLM_PORT_START + DECODE_DP_SIZE - 1))"
+echo "[decode-recover] patch     : VLLM_ITS_DEEPSEEK_V4=${VLLM_ITS_DEEPSEEK_V4}"
 echo "[decode-recover] baseline  : ${PRE_OUTPUT}"
 echo "[decode-recover] log dir   : ${TEST_LOG_DIR}"
 echo "============================================================"

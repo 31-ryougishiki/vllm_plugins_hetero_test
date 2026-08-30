@@ -82,6 +82,10 @@ cd /opt/its/z30055003/vllm_plugins_hetero_test
 bash install_vllm_plugins.sh
 ```
 
+> 合并后的 vllm_plugins 默认走 0829 实现。本目录只调试 DeepSeek-V4，
+> 因此 `install_vllm_plugins.sh` 和所有 launch 脚本默认
+> `VLLM_ITS_DEEPSEEK_V4=1`；安装期与运行期必须保持同一个值。
+
 > D 端不接收策略，但必须加载 zero_interrupt：异构重启后 P 端会轮换
 > `engine_id`/handshake_port，D 端依赖 `patch_hetero_mooncake.py` 重新拉取
 > 远端元数据，否则续推链路无法恢复。
@@ -288,6 +292,7 @@ nohup bash decode/run_decode_recover_alone.sh \
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| `VLLM_ITS_DEEPSEEK_V4` | 1（本目录的 launch/install 脚本） | `1` 使用 `deepseekv4/` patch 族，必须与安装期一致 |
 | `DECODE_HOST` | 必填 | decode 节点 IP |
 | `DECODE_VLLM_PORT_START` | 9100 | D 端 vLLM 起始端口 |
 | `DECODE_DP_SIZE` | 16 | D 端初始 DP 数 |

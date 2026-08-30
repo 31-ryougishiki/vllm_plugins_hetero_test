@@ -54,6 +54,7 @@ echo "[launch] local ip  : ${LOCAL_IP}  nic: ${NIC}"
 echo "[launch] topology  : DP${DP_SIZE}TP${TP_SIZE} (initial symmetric)"
 echo "[launch] vllm ports: ${VLLM_PORT_START}..$((VLLM_PORT_START + DP_SIZE - 1))"
 echo "[launch] ITS ports : ${ITS_HTTP_PORT_START}..$((ITS_HTTP_PORT_START + (DP_SIZE - 1) * TP_SIZE))"
+echo "[launch] patch     : VLLM_ITS_DEEPSEEK_V4=${VLLM_ITS_DEEPSEEK_V4:-1} (1=DeepSeek-V4)"
 echo "[launch] log dir   : ${LOG_DIR}"
 echo "============================================================"
 
@@ -92,6 +93,9 @@ fi
 
 # ---------------- vllm_plugins / zero_interrupt ----------------
 export VLLM_CUSTOM_PATCHES="${VLLM_CUSTOM_PATCHES:-zero_interrupt}"
+# 合并后的 vllm_plugins 默认走 0829 实现；DeepSeek-V4 调试场景必须显式选择
+# deepseekv4 patch 族。该值必须与 install_vllm_plugins.sh 安装时一致。
+export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 # 纯脚本测试默认跳过 license 校验；生产环境务必去掉该变量并配置
 # LICENSE_PATH / CERT_PATH / PRODUCT_KEY_PATH。
 export VLLM_CUSTOM_PLUGINS_SKIP_LICENSE="${VLLM_CUSTOM_PLUGINS_SKIP_LICENSE:-1}"

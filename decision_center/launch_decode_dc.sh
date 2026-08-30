@@ -31,11 +31,14 @@ export WORK_ROOT MODEL_PATH LOG_DIR
 export VLLM_SERVICE_ID
 export VLLM_ITS_DECISION_CENTER_URL="${DECISION_CENTER_URL}"
 export VLLM_ITS_MAX_RETRY_COUNT="${VLLM_ITS_MAX_RETRY_COUNT:-3}"
+# D 端依赖 deepseekv4/ 下的 patch_hetero_mooncake.py，必须与安装时一致。
+export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 
 echo "============================================================"
 echo "[launch-d-dc] decode host       : ${DECODE_HOST}"
 echo "[launch-d-dc] decision center   : ${DECISION_CENTER_URL}"
 echo "[launch-d-dc] service id        : ${VLLM_SERVICE_ID}"
+echo "[launch-d-dc] patch             : VLLM_ITS_DEEPSEEK_V4=${VLLM_ITS_DEEPSEEK_V4}"
 echo "[launch-d-dc] topology          : DP16TP1"
 echo "[launch-d-dc] log dir           : ${LOG_DIR}"
 echo "============================================================"

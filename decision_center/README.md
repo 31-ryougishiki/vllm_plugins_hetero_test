@@ -28,6 +28,10 @@ P/D 的 **20 个 executor 必须使用同一个 `VLLM_SERVICE_ID`**（默认
 
 两个节点都安装最新 vllm_plugins wheel 后，分别在对应节点执行：
 
+> 合并后的 vllm_plugins 默认走 0829 实现；DeepSeek-V4 / 决策中心场景
+> 必须使用 `VLLM_ITS_DEEPSEEK_V4=1`。`install_vllm_plugins.sh` 与
+> `launch_*_dc.sh` 已默认设置该值，安装期与运行期保持一致。
+
 ```bash
 # prefill 节点 7.246.78.75
 cd /opt/its/z30055003/vllm_plugins_hetero_test
@@ -44,7 +48,8 @@ nohup bash decision_center/launch_decode_dc.sh \
 
 1. 设置 `VLLM_ITS_DECISION_CENTER_URL=http://7.246.78.79:8088`；
 2. 设置统一 `VLLM_SERVICE_ID=pd-hetero-service`；
-3. 等待本节点全部 engine 的 `/health` 就绪。
+3. 设置 `VLLM_ITS_DEEPSEEK_V4=1`（DeepSeek-V4 patch 族）；
+4. 等待本节点全部 engine 的 `/health` 就绪。
 
 确认决策中心已经看到全部 executor：
 
