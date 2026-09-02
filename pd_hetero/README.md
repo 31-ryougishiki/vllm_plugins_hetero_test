@@ -38,6 +38,8 @@ vllm_plugins 的测试路径是
 pd_hetero/
 ├── README.md
 ├── common.sh                        # 场景编排公共函数库（check/wait/warmup/请求/对比/触发）
+├── launch_online_dp.py              # 最简启动编排：按 DP rank 调 run_dp_template.sh
+├── run_dp_template.sh               # 单 rank 模板：exec bash $ORIGIN_SCRIPT $@
 ├── run_scenario1.sh                # 场景1编排：P 转异构，D 不变
 ├── run_scenario2.sh                # 场景2编排：D 坏1卡缩容，P 不变
 ├── run_scenario3.sh                # 场景3编排：P/D RECOVER 恢复对称拓扑
@@ -45,11 +47,19 @@ pd_hetero/
 ├── proxy_instance.py               # 代理实例 add/remove 工具
 ├── check_decode_unchanged.sh       # 场景1校验 D 端健康且未被重启
 ├── decode/
+│   ├── origin.sh                   # 最简启动：单 rank vllm serve（DP16TP1 kv_consumer）
+│   ├── start_server.sh             # 最简启动：注入 D 端环境变量 -> launch_online_dp.py
 │   ├── launch_decode_pd.sh         # D 节点启动 dp16/tp1
 │   ├── trigger_decode_fault.sh     # 场景2触发 D 端 dp16 -> dp15
 │   ├── run_decode_fault_alone.sh   # 仅 D 节点单独跑场景2（不依赖 P/代理）
 │   ├── trigger_decode_recover.sh   # 场景3触发 D 端 dp15 -> dp16
 │   └── run_decode_recover_alone.sh # 仅 D 节点单独跑 RECOVER（不依赖 P/代理）
+├── prefill/
+│   ├── origin.sh                   # 最简启动：单 rank vllm serve（DP4TP4 kv_producer）
+│   └── start_server.sh             # 最简启动：注入 P 端环境变量 -> launch_online_dp.py
+├── minimal/                        # 最简脚本集：proxy + curl 触发（README 有完整说明）
+│   ├── start_proxy.sh
+│   └── trigger_hetero_dc.sh
 └── proxy/
     ├── start_proxy_pd.sh           # P 节点启动 PD 代理
     └── load_balance_proxy_server.py
@@ -73,6 +83,29 @@ prefill 节点（16 NPU）                 decode 节点（16 NPU）
 - P 端端口：vLLM `9000..9003`，ITS HTTP `8001/8005/8009/8013`；
 - D 端端口：vLLM `9100..9115`；
 - PD 代理：P 节点 `8000`（可覆盖 `PROXY_PORT`）。
+
+## 最简拉起（决策中心）
+
+不需要完整场景编排时，用最小脚本集直接拉起并触发异构：
+
+```bash
+# prefill 节点（7.246.78.75）
+bash pd_hetero/prefill/start_server.sh
+
+# decode 节点（7.246.78.76）
+bash pd_hetero/decode/start_server.sh
+
+# prefill 节点：拉起 proxy（两端 /health 就绪后）
+DECODE_HOST=7.246.78.76 bash pd_hetero/minimal/start_proxy.sh
+
+# 任意节点：curl 触发决策中心异构
+bash pd_hetero/minimal/trigger_hetero_dc.sh 7.246.78.75 3
+```
+
+启动链路：`start_server.sh` 注入全部环境变量 →
+`launch_online_dp.py` 逐 DP rank 调用 `run_dp_template.sh` →
+`exec bash <role>/origin.sh`。详细说明与可覆盖变量见
+[`minimal/README.md`](minimal/README.md)。
 
 ## 使用步骤
 
