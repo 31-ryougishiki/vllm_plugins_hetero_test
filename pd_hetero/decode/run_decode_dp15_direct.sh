@@ -66,11 +66,21 @@ CURL_TIMEOUT="${CURL_TIMEOUT:-180}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-600}"
 
+# DP15 真实前向会走 eager ALLGATHER，HCCL/ATB 默认算法不保证逐次可复现。
+# 打开 vllm-ascend 推荐的确定性开关后再比较 5 次输出，性能会有少量下降。
+ENABLE_DETERMINISTIC="${ENABLE_DETERMINISTIC:-1}"
+
 mkdir -p "${DECODE_LOG_DIR}" "${TEST_LOG_DIR}"
 
 export WORK_ROOT MODEL_PATH LOCAL_IP NIC
 export DECODE_VLLM_PORT_START DECODE_ITS_PORT_START DECODE_LOG_DIR
 export PYTHON_BIN
+if [[ "${ENABLE_DETERMINISTIC}" == "1" ]]; then
+    export HCCL_DETERMINISTIC="${HCCL_DETERMINISTIC:-true}"
+    export LCCL_DETERMINISTIC="${LCCL_DETERMINISTIC:-1}"
+    export ATB_MATMUL_SHUFFLE_K_ENABLE="${ATB_MATMUL_SHUFFLE_K_ENABLE:-0}"
+    export ATB_LLM_LCOC_ENABLE="${ATB_LLM_LCOC_ENABLE:-0}"
+fi
 export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"
 # 默认打开逐 step 采样与 DP 元数据诊断，卡死/分叉时日志可直接定位。
 export VLLM_ITS_DUMP_SAMPLED_TOKENS="${VLLM_ITS_DUMP_SAMPLED_TOKENS:-1}"
@@ -85,6 +95,7 @@ echo "[decode-dp15-direct] ITS ports : ${DECODE_ITS_PORT_START}..$((DECODE_ITS_P
 echo "[decode-dp15-direct] log dir   : ${DECODE_LOG_DIR}"
 echo "[decode-dp15-direct] probe     : dp${PROBE_RANK}, repeats=${N_REPEATS}"
 echo "[decode-dp15-direct] diag      : DUMP_SAMPLED_TOKENS=${VLLM_ITS_DUMP_SAMPLED_TOKENS}, DUMP_DP_META_EVERY=${VLLM_ITS_DUMP_DP_META_EVERY}"
+echo "[decode-dp15-direct] deterministic: ENABLE_DETERMINISTIC=${ENABLE_DETERMINISTIC}, HCCL_DETERMINISTIC=${HCCL_DETERMINISTIC:-unset}, LCCL_DETERMINISTIC=${LCCL_DETERMINISTIC:-unset}, ATB_MATMUL_SHUFFLE_K_ENABLE=${ATB_MATMUL_SHUFFLE_K_ENABLE:-unset}, ATB_LLM_LCOC_ENABLE=${ATB_LLM_LCOC_ENABLE:-unset}"
 echo "============================================================"
 
 check_http() {
