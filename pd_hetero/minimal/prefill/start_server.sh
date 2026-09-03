@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-export LOCAL_IP="${LOCAL_IP:-7.246.78.75}"
+export LOCAL_IP="${LOCAL_IP:-7.246.78.74}"
 export VLLM_ITS_DECISION_CENTER_URL="${VLLM_ITS_DECISION_CENTER_URL:-http://7.246.78.79:8088}"
 export VLLM_SERVICE_ID="${VLLM_SERVICE_ID:-pd-hetero-service}"
 export VLLM_ITS_DEEPSEEK_V4="${VLLM_ITS_DEEPSEEK_V4:-1}"

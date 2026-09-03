@@ -1,6 +1,6 @@
 # 由 start_server.sh 注入；未注入时保留 origin 默认值。
 nic_name="${NIC:-eth2}" # change to your own nic name
-local_ip="${LOCAL_IP:-${PREFILL_HOST:-7.246.78.76}}" # change to your own ip
+local_ip="${LOCAL_IP:-${PREFILL_HOST:-7.246.78.74}}" # change to your own ip
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -15,10 +15,10 @@ export OMP_NUM_THREADS=10
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=2560
 export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export ASCEND_RT_VISIBLE_DEVICES=$1
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
 vllm serve /opt/its/model/DeepSeek-V4-Flash-w8a8-mtp-self \
     --host 0.0.0.0 \
@@ -35,10 +35,12 @@ vllm serve /opt/its/model/DeepSeek-V4-Flash-w8a8-mtp-self \
     --max-num-batched-tokens 8192 \
     --max-num-seqs 16 \
     --no-disable-hybrid-kv-cache-manager \
-    --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
+    --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+    --no-enable-prefix-caching \
+    --safetensors-load-strategy 'prefetch' \
     --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
     --trust-remote-code \
-    --block-size 32 \
+    --block-size 128 \
     --tokenizer-mode deepseek_v4 \
     --tool-call-parser deepseek_v4 \
     --enable-auto-tool-choice \

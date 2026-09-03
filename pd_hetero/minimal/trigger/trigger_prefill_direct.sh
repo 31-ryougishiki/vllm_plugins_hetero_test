@@ -4,7 +4,7 @@
 # 在 prefill 节点执行：bash minimal/trigger/trigger_prefill_direct.sh
 set -euo pipefail
 
-LOCAL_IP="${LOCAL_IP:-7.246.78.75}"
+LOCAL_IP="${LOCAL_IP:-7.246.78.74}"
 ITS_HTTP_PORT_START="${ITS_HTTP_PORT_START:-8001}"
 DP_SIZE="${DP_SIZE:-4}"
 TP_SIZE="${TP_SIZE:-4}"

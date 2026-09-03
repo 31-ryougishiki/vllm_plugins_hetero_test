@@ -72,5 +72,5 @@ vllm serve /opt/its/model/DeepSeek-V4-Flash-w8a8-mtp-self \
         },
         "enable_cpu_binding":true,
         "multistream_overlap_shared_expert":true,
-        "recompute_scheduler_enable":false
+        "recompute_scheduler_enable":true
     }'
